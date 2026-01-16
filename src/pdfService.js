@@ -1,6 +1,6 @@
 import * as pdfjsLib from "pdfjs-dist/build/pdf";
 import pdfjsWorker from "pdfjs-dist/build/pdf.worker?worker";
-import { PDFDocument } from "pdf-lib";
+import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
 
 if (typeof window !== "undefined") {
   const WorkerCtor =
@@ -170,6 +170,83 @@ export async function applyImageAnnotations(bytes, assets, annotations) {
       y: pdfRect.y,
       width: pdfRect.width,
       height: pdfRect.height
+    });
+  }
+
+  return pdfDoc.save();
+}
+
+function parseHexColor(color) {
+  if (!color || typeof color !== "string") {
+    return rgb(0, 0, 0);
+  }
+  const cleaned = color.startsWith("#") ? color.slice(1) : color;
+  if (cleaned.length !== 6) {
+    return rgb(0, 0, 0);
+  }
+  const r = Number.parseInt(cleaned.slice(0, 2), 16);
+  const g = Number.parseInt(cleaned.slice(2, 4), 16);
+  const b = Number.parseInt(cleaned.slice(4, 6), 16);
+  if ([r, g, b].some((value) => Number.isNaN(value))) {
+    return rgb(0, 0, 0);
+  }
+  return rgb(r / 255, g / 255, b / 255);
+}
+
+const FONT_MAP = {
+  Helvetica: StandardFonts.Helvetica,
+  Times: StandardFonts.TimesRoman,
+  Courier: StandardFonts.Courier
+};
+
+export async function applyTextAnnotations(bytes, annotations) {
+  if (!annotations.length) {
+    return bytes;
+  }
+  const sourceBytes = bytes instanceof Uint8Array ? bytes.slice() : new Uint8Array(bytes);
+  const pdfDoc = await PDFDocument.load(sourceBytes);
+  const fontCache = new Map();
+
+  for (const annotation of annotations) {
+    const pageIndex = Math.max(
+      0,
+      Math.min(annotation.pageNumber - 1, pdfDoc.getPageCount() - 1)
+    );
+    const page = pdfDoc.getPage(pageIndex);
+    const { width: pageWidth, height: pageHeight } = page.getSize();
+    if (!annotation.overlayWidth || !annotation.overlayHeight) {
+      throw new Error("Missing overlay size for text placement.");
+    }
+    const overlaySize = {
+      width: annotation.overlayWidth,
+      height: annotation.overlayHeight
+    };
+    const pdfRect = convertOverlayRectToPdfRect(
+      {
+        x: annotation.x,
+        y: annotation.y,
+        width: annotation.width,
+        height: annotation.height
+      },
+      { width: pageWidth, height: pageHeight },
+      overlaySize
+    );
+
+    const fontKey = FONT_MAP[annotation.fontFamily] ?? StandardFonts.Helvetica;
+    if (!fontCache.has(fontKey)) {
+      fontCache.set(fontKey, await pdfDoc.embedFont(fontKey));
+    }
+    const font = fontCache.get(fontKey);
+    const fontSize = annotation.fontSize ?? 16;
+    const color = parseHexColor(annotation.color);
+
+    page.drawText(annotation.text ?? "", {
+      x: pdfRect.x,
+      y: pdfRect.y + pdfRect.height - fontSize,
+      size: fontSize,
+      font,
+      color,
+      maxWidth: pdfRect.width
     });
   }
 

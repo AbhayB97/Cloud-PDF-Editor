@@ -1,5 +1,6 @@
 import {
   applyImageAnnotations,
+  applyTextAnnotations,
   isPdfBytes,
   isPdfFile,
   loadPdfDocument,
@@ -18,7 +19,10 @@ const state = {
   currentPage: 1,
   pageOrder: [],
   imageAssets: [],
-  imageAnnotations: []
+  imageAnnotations: [],
+  textAnnotations: [],
+  activeTool: "select",
+  selectedTextId: null
 };
 
 function createButton(label, onClick, className) {
@@ -46,6 +50,14 @@ function createId(prefix) {
 
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
+}
+
+function getOverlayBounds(overlay) {
+  const rect = overlay.getBoundingClientRect();
+  return {
+    width: rect.width || overlay.offsetWidth,
+    height: rect.height || overlay.offsetHeight
+  };
 }
 
 function getImageDimensions(objectUrl) {
@@ -165,6 +177,7 @@ function renderAssetList(assetList, statusEl) {
 function renderAnnotations(overlay, statusEl) {
   overlay.innerHTML = "";
   if (!state.imageAnnotations.length) {
+    renderTextAnnotations(overlay, statusEl);
     return;
   }
   const current = state.imageAnnotations.filter(
@@ -192,6 +205,8 @@ function renderAnnotations(overlay, statusEl) {
     attachAnnotationInteractions(el, annotation, overlay, statusEl);
     overlay.append(el);
   });
+
+  renderTextAnnotations(overlay, statusEl);
 }
 
 function attachAnnotationInteractions(element, annotation, overlay, statusEl) {
@@ -281,6 +296,132 @@ function attachAnnotationInteractions(element, annotation, overlay, statusEl) {
   });
 }
 
+function renderTextAnnotations(overlay, statusEl) {
+  const current = state.textAnnotations.filter(
+    (annotation) => annotation.pageNumber === state.currentPage
+  );
+  current.forEach((annotation) => {
+    const wrapper = document.createElement("div");
+    wrapper.className = "text-annotation";
+    wrapper.tabIndex = 0;
+    wrapper.dataset.annotationId = annotation.id;
+    wrapper.dataset.role = "text-annotation";
+    wrapper.style.left = `${annotation.x}px`;
+    wrapper.style.top = `${annotation.y}px`;
+    wrapper.style.width = `${annotation.width}px`;
+    wrapper.style.height = `${annotation.height}px`;
+    wrapper.style.fontSize = `${annotation.fontSize}px`;
+    wrapper.style.fontFamily = annotation.fontFamily;
+    wrapper.style.color = annotation.color;
+
+    const content = document.createElement("div");
+    content.className = "text-content";
+    content.contentEditable = "true";
+    content.spellcheck = false;
+    content.textContent = annotation.text;
+
+    const handle = document.createElement("div");
+    handle.className = "resize-handle";
+
+    wrapper.append(content, handle);
+    attachTextInteractions(wrapper, content, annotation, overlay, statusEl);
+    overlay.append(wrapper);
+  });
+}
+
+function attachTextInteractions(wrapper, content, annotation, overlay, statusEl) {
+  const getBounds = () => getOverlayBounds(overlay);
+
+  const startMove = (event) => {
+    if (event.button !== 0) {
+      return;
+    }
+    if (event.target.classList.contains("resize-handle")) {
+      return;
+    }
+    if (event.target.classList.contains("text-content")) {
+      return;
+    }
+    event.preventDefault();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const originX = annotation.x;
+    const originY = annotation.y;
+    const bounds = getBounds();
+
+    const onMove = (moveEvent) => {
+      const dx = moveEvent.clientX - startX;
+      const dy = moveEvent.clientY - startY;
+      annotation.x = clamp(originX + dx, 0, bounds.width - annotation.width);
+      annotation.y = clamp(originY + dy, 0, bounds.height - annotation.height);
+      wrapper.style.left = `${annotation.x}px`;
+      wrapper.style.top = `${annotation.y}px`;
+    };
+
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
+  const startResize = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const originWidth = annotation.width;
+    const originHeight = annotation.height;
+    const bounds = getBounds();
+
+    const onMove = (moveEvent) => {
+      const dx = moveEvent.clientX - startX;
+      const dy = moveEvent.clientY - startY;
+      const nextWidth = clamp(originWidth + dx, 60, bounds.width - annotation.x);
+      const nextHeight = clamp(originHeight + dy, 24, bounds.height - annotation.y);
+      annotation.width = nextWidth;
+      annotation.height = nextHeight;
+      wrapper.style.width = `${annotation.width}px`;
+      wrapper.style.height = `${annotation.height}px`;
+    };
+
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
+  wrapper.addEventListener("pointerdown", (event) => {
+    if (event.target.classList.contains("resize-handle")) {
+      startResize(event);
+      return;
+    }
+    startMove(event);
+  });
+
+  wrapper.addEventListener("focusin", () => {
+    state.selectedTextId = annotation.id;
+  });
+
+  content.addEventListener("input", () => {
+    annotation.text = content.textContent ?? "";
+  });
+
+  wrapper.addEventListener("keydown", (event) => {
+    if (event.key !== "Backspace" && event.key !== "Delete") {
+      return;
+    }
+    state.textAnnotations = state.textAnnotations.filter((item) => item.id !== annotation.id);
+    wrapper.remove();
+    setStatus(statusEl, "Text removed.");
+  });
+}
+
 function toUint8(bytes) {
   return bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
 }
@@ -310,6 +451,8 @@ async function loadPdfBytes(
   state.pageOrder = Array.from({ length: state.pageCount }, (_, index) => index + 1);
   state.imageAnnotations = [];
   state.imageAssets = [];
+  state.textAnnotations = [];
+  state.selectedTextId = null;
   renderPageList(pageList, applyButton);
   updatePageLabel(pageLabel);
   await refreshViewer(canvas, overlay, pageLabel, statusEl);
@@ -459,12 +602,57 @@ export function initApp(root) {
   const overlay = document.createElement("div");
   overlay.className = "page-overlay";
   overlay.dataset.role = "page-overlay";
+  overlay.dataset.mode = state.activeTool;
   overlay.addEventListener("dragover", (event) => {
     event.preventDefault();
     overlay.classList.add("drag-over");
   });
   overlay.addEventListener("dragleave", () => {
     overlay.classList.remove("drag-over");
+  });
+
+  overlay.addEventListener("click", (event) => {
+    if (state.activeTool !== "text") {
+      return;
+    }
+    if (!state.currentBytes) {
+      setStatus(status, "Load a PDF before adding text.", true);
+      return;
+    }
+    if (event.target.closest(".text-annotation") || event.target.closest(".annotation")) {
+      return;
+    }
+    const rect = overlay.getBoundingClientRect();
+    const overlayWidth = rect.width || overlay.offsetWidth;
+    const overlayHeight = rect.height || overlay.offsetHeight;
+    if (!overlayWidth || !overlayHeight) {
+      setStatus(status, "Overlay not ready yet. Try again.", true);
+      return;
+    }
+    const x = clamp(event.clientX - rect.left, 0, overlayWidth - 160);
+    const y = clamp(event.clientY - rect.top, 0, overlayHeight - 32);
+    const annotation = {
+      id: createId("text"),
+      pageNumber: state.currentPage,
+      x,
+      y,
+      width: 160,
+      height: 32,
+      text: "",
+      fontSize: 16,
+      fontFamily: "Helvetica",
+      color: "#111111",
+      overlayWidth,
+      overlayHeight
+    };
+    state.textAnnotations = [...state.textAnnotations, annotation];
+    state.selectedTextId = annotation.id;
+    renderAnnotations(overlay, status);
+    const created = overlay.querySelector(`[data-annotation-id="${annotation.id}"]`);
+    const content = created?.querySelector(".text-content");
+    if (content) {
+      content.focus();
+    }
   });
 
   overlay.addEventListener("drop", (event) => {
@@ -595,6 +783,108 @@ export function initApp(root) {
   renderAssetList(assetList, status);
   assetGroup.append(assetTitle, assetInput, assetList);
 
+  const textToolGroup = document.createElement("section");
+  textToolGroup.className = "panel";
+  const textTitle = document.createElement("p");
+  textTitle.className = "section-title";
+  textTitle.textContent = "Text Tool";
+  const textToggle = createButton("Add Text", () => {
+    state.activeTool = state.activeTool === "text" ? "select" : "text";
+    overlay.dataset.mode = state.activeTool;
+    textToggle.textContent = state.activeTool === "text" ? "Exit Text Tool" : "Add Text";
+  }, "primary");
+  textToggle.dataset.role = "text-tool-toggle";
+
+  const fontSizeInput = document.createElement("input");
+  fontSizeInput.type = "number";
+  fontSizeInput.min = "8";
+  fontSizeInput.max = "72";
+  fontSizeInput.value = "16";
+  fontSizeInput.dataset.role = "text-font-size";
+
+  const fontFamilySelect = document.createElement("select");
+  fontFamilySelect.dataset.role = "text-font-family";
+  ["Helvetica", "Times", "Courier"].forEach((family) => {
+    const option = document.createElement("option");
+    option.value = family;
+    option.textContent = family;
+    fontFamilySelect.append(option);
+  });
+
+  const colorInput = document.createElement("input");
+  colorInput.type = "color";
+  colorInput.value = "#111111";
+  colorInput.dataset.role = "text-color";
+
+  const removeTextButton = createButton("Remove Text", () => {
+    if (!state.selectedTextId) {
+      setStatus(status, "Select a text annotation to remove.", true);
+      return;
+    }
+    state.textAnnotations = state.textAnnotations.filter(
+      (item) => item.id !== state.selectedTextId
+    );
+    state.selectedTextId = null;
+    renderAnnotations(overlay, status);
+    setStatus(status, "Text removed.");
+  });
+
+  const updateSelectedText = (update) => {
+    if (!state.selectedTextId) {
+      setStatus(status, "Select a text annotation first.", true);
+      return;
+    }
+    const annotation = state.textAnnotations.find((item) => item.id === state.selectedTextId);
+    if (!annotation) {
+      return;
+    }
+    update(annotation);
+    renderAnnotations(overlay, status);
+  };
+
+  fontSizeInput.addEventListener("change", () => {
+    const value = Number.parseInt(fontSizeInput.value, 10);
+    updateSelectedText((annotation) => {
+      annotation.fontSize = Number.isFinite(value) ? value : annotation.fontSize;
+    });
+  });
+
+  fontFamilySelect.addEventListener("change", () => {
+    updateSelectedText((annotation) => {
+      annotation.fontFamily = fontFamilySelect.value;
+    });
+  });
+
+  colorInput.addEventListener("input", () => {
+    updateSelectedText((annotation) => {
+      annotation.color = colorInput.value;
+    });
+  });
+
+  overlay.addEventListener("focusin", (event) => {
+    const wrapper = event.target.closest(".text-annotation");
+    if (!wrapper) {
+      return;
+    }
+    const annotation = state.textAnnotations.find((item) => item.id === wrapper.dataset.annotationId);
+    if (!annotation) {
+      return;
+    }
+    state.selectedTextId = annotation.id;
+    fontSizeInput.value = String(annotation.fontSize);
+    fontFamilySelect.value = annotation.fontFamily;
+    colorInput.value = annotation.color;
+  });
+
+  textToolGroup.append(
+    textTitle,
+    textToggle,
+    fontSizeInput,
+    fontFamilySelect,
+    colorInput,
+    removeTextButton
+  );
+
   const reorderGroup = document.createElement("section");
   reorderGroup.className = "panel";
   const reorderTitle = document.createElement("p");
@@ -611,12 +901,17 @@ export function initApp(root) {
     }
     try {
       const currentAssets = state.imageAssets;
-      const currentAnnotations = state.imageAnnotations;
+      const currentImageAnnotations = state.imageAnnotations;
+      const currentTextAnnotations = state.textAnnotations;
       const pageMapping = new Map();
       state.pageOrder.forEach((oldPageNumber, index) => {
         pageMapping.set(oldPageNumber, index + 1);
       });
-      const remappedAnnotations = currentAnnotations.map((annotation) => ({
+      const remappedImageAnnotations = currentImageAnnotations.map((annotation) => ({
+        ...annotation,
+        pageNumber: pageMapping.get(annotation.pageNumber) ?? annotation.pageNumber
+      }));
+      const remappedTextAnnotations = currentTextAnnotations.map((annotation) => ({
         ...annotation,
         pageNumber: pageMapping.get(annotation.pageNumber) ?? annotation.pageNumber
       }));
@@ -631,7 +926,8 @@ export function initApp(root) {
         applyReorderButton
       );
       state.imageAssets = currentAssets;
-      state.imageAnnotations = remappedAnnotations;
+      state.imageAnnotations = remappedImageAnnotations;
+      state.textAnnotations = remappedTextAnnotations;
       renderAssetList(assetList, status);
       renderAnnotations(overlay, status);
       setStatus(status, "Reorder applied.");
@@ -656,14 +952,17 @@ export function initApp(root) {
       return;
     }
     try {
-      const exportBytes =
-        state.imageAnnotations.length > 0
-          ? await applyImageAnnotations(
-              state.currentBytes,
-              state.imageAssets,
-              state.imageAnnotations
-            )
-          : state.currentBytes;
+      let exportBytes = state.currentBytes;
+      if (state.imageAnnotations.length > 0) {
+        exportBytes = await applyImageAnnotations(
+          exportBytes,
+          state.imageAssets,
+          state.imageAnnotations
+        );
+      }
+      if (state.textAnnotations.length > 0) {
+        exportBytes = await applyTextAnnotations(exportBytes, state.textAnnotations);
+      }
       const blob = new Blob([exportBytes], { type: "application/pdf" });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
@@ -680,9 +979,13 @@ export function initApp(root) {
   }, "primary");
   exportGroup.append(exportTitle, exportButton);
 
+  const sidePanel = document.createElement("div");
+  sidePanel.className = "side-panel";
+  sidePanel.append(assetGroup, textToolGroup);
+
   const workspace = document.createElement("div");
   workspace.className = "workspace";
-  workspace.append(assetGroup, viewerGroup);
+  workspace.append(sidePanel, viewerGroup);
 
   container.append(
     title,

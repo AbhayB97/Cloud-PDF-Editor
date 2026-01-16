@@ -182,4 +182,52 @@ describe("pdfService", () => {
     const updated = await applyImageAnnotations(bytes, assets, annotations);
     expect(updated.byteLength).toBeGreaterThan(bytes.byteLength);
   });
+
+  it("applies text annotations and keeps original bytes intact", async () => {
+    const { applyTextAnnotations } = await import("../src/pdfService.js");
+    const bytes = await createPdfWithPageSizes([[600, 800]]);
+    const original = new Uint8Array(bytes);
+    const annotations = [
+      {
+        id: "text-1",
+        pageNumber: 1,
+        x: 20,
+        y: 40,
+        width: 200,
+        height: 40,
+        text: "Hello",
+        fontSize: 18,
+        fontFamily: "Helvetica",
+        color: "#111111",
+        overlayWidth: 300,
+        overlayHeight: 400
+      }
+    ];
+    const updated = await applyTextAnnotations(bytes, annotations);
+    expect(Array.from(new Uint8Array(bytes))).toEqual(Array.from(original));
+    expect(updated.byteLength).toBeGreaterThan(bytes.byteLength);
+  });
+
+  it("embeds a monospaced font for text annotations", async () => {
+    const { applyTextAnnotations } = await import("../src/pdfService.js");
+    const bytes = await createPdfWithPageSizes([[600, 800]]);
+    const annotations = [
+      {
+        id: "text-2",
+        pageNumber: 1,
+        x: 30,
+        y: 60,
+        width: 240,
+        height: 50,
+        text: "Mono",
+        fontSize: 14,
+        fontFamily: "Courier",
+        color: "#000000",
+        overlayWidth: 300,
+        overlayHeight: 400
+      }
+    ];
+    const updated = await applyTextAnnotations(bytes, annotations);
+    expect(updated.byteLength).toBeGreaterThan(bytes.byteLength);
+  });
 });

@@ -560,3 +560,234 @@ This change only improves UX.
 The underlying PDF pipeline must remain stable and unchanged.
 
 Do not refactor unrelated code.
+
+------------------------------
+Text Form Filling via Overlay Annotations (Authoritative)
+Objective
+
+Add support for typing text directly onto PDFs, including non-fillable PDFs (e.g., Word documents printed to PDF), using overlay-based text annotations.
+
+This feature must allow users to visually place, move, resize, and edit text on top of a PDF and permanently apply it only on export.
+
+Hard Constraints (Do Not Violate)
+
+Do NOT edit existing PDF text
+
+Do NOT attempt OCR
+
+Do NOT auto-detect form fields
+
+Do NOT modify original PDF bytes
+
+Do NOT introduce backend processing
+
+Do NOT autosave or silently persist text
+
+All behavior must remain local-first
+
+Export must use existing pdf-lib pipeline
+
+Functional Requirements
+1. Text Tool Activation
+
+Add a “Add Text” tool/button to the UI
+
+When active:
+
+Cursor indicates text placement mode
+
+Clicking on a PDF page creates a new text annotation
+
+2. Text Placement
+
+On click:
+
+Create a text annotation at click position
+
+Insert a visible text caret
+
+Allow immediate typing
+
+Text must appear as an overlay element above the PDF
+
+3. Text Editing
+
+Each text annotation must support:
+
+Editing text content
+
+Moving (drag)
+
+Resizing (basic resize handles acceptable)
+
+Font size adjustment
+
+Font family selection (must include a monospaced font)
+
+Text color (default: black)
+
+All changes update annotation state only, not the PDF.
+
+Data Model (Must Use or Equivalent)
+TextAnnotation {
+  id: string
+  pageNumber: number
+  x: number
+  y: number
+  width: number
+  height: number
+  text: string
+  fontSize: number
+  fontFamily: string
+  color: string
+}
+
+
+Text annotations must be stored alongside image annotations, using the same overlay/annotation system.
+
+Rendering Rules
+
+Text annotations must be rendered in the page overlay layer
+
+Overlay origin is top-left
+
+Positioning must be visually WYSIWYG relative to PDF content
+
+Text must remain readable at different zoom levels
+
+Export Rules (Critical)
+
+On export:
+
+Load original PDF bytes
+
+For each TextAnnotation:
+
+Convert overlay coordinates → PDF coordinates
+
+Embed font explicitly using pdf-lib
+
+Draw text using drawText()
+
+Save as a new PDF file
+
+Rules:
+
+Original PDF must remain untouched
+
+Text position in exported PDF must match on-screen placement
+
+Font embedding must be deterministic
+
+Coordinate conversion:
+
+pdfY = pageHeight - overlayY - overlayHeight
+
+
+Centralize this logic in pdfService.js.
+
+File Responsibilities
+
+app.js
+
+Text tool UI
+
+Click-to-create text annotations
+
+Overlay rendering of text boxes
+
+Drag / resize / edit behavior
+
+Annotation state management
+
+pdfService.js
+
+Text embedding using pdf-lib
+
+Font embedding
+
+Coordinate conversion
+
+Export logic (reuse existing flow)
+
+storage.js
+
+Optional session persistence only
+
+Must not autosave without user consent
+
+sw.js / main.js
+
+No changes allowed
+
+UX Expectations
+
+Text placement must feel similar to filling a printed form
+
+User manually aligns text to blanks/lines
+
+No assumptions about form structure
+
+No snapping or auto-alignment required in this phase
+
+Tests (Mandatory)
+
+Add tests covering:
+
+Creating a text annotation on click
+
+Editing text content
+
+Moving and resizing text annotations
+
+Exported PDF contains typed text
+
+Text position matches overlay preview
+
+Font embedding works (including monospaced font)
+
+Original PDF bytes remain unchanged
+
+Works offline
+
+Failing tests block completion.
+
+Explicitly Out of Scope
+
+Editing existing PDF text
+
+OCR
+
+PDF AcroForm detection
+
+Auto field alignment
+
+Spellcheck or rich text
+
+Completion Criteria
+
+This task is complete only when:
+
+User can type anywhere on a PDF, including non-fillable PDFs
+
+Text behaves like a form-filling overlay
+
+Export produces a correct, flattened PDF
+
+No regressions to image placement, merging, export, or offline support
+
+All tests pass
+
+Final Reminder
+
+This feature adds text overlays, not text editing.
+
+Preserve:
+
+predictability
+
+legal safety
+
+long-term stability
+
+Do not refactor unrelated code.
