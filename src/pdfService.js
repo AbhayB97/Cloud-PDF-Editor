@@ -67,3 +67,42 @@ export async function mergePdfs(listOfBytes) {
   }
   return target.save();
 }
+
+function detectImageType(bytes) {
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
+    return "png";
+  }
+  if (bytes[0] === 0xff && bytes[1] === 0xd8) {
+    return "jpg";
+  }
+  return null;
+}
+
+export async function insertImage(bytes, imageBytes, options = {}) {
+  const pdfDoc = await PDFDocument.load(bytes);
+  const pageNumber = options.pageNumber ?? 1;
+  const pageIndex = Math.max(0, Math.min(pageNumber - 1, pdfDoc.getPageCount() - 1));
+  const page = pdfDoc.getPage(pageIndex);
+  const pngOrJpg = detectImageType(imageBytes);
+  if (!pngOrJpg) {
+    throw new Error("Only PNG and JPEG images are supported.");
+  }
+
+  const embed = pngOrJpg === "png" ? pdfDoc.embedPng : pdfDoc.embedJpg;
+  const image = await embed.call(pdfDoc, imageBytes);
+  const { width: pageWidth, height: pageHeight } = page.getSize();
+  const scale = options.scale ?? (pageWidth * 0.3) / image.width;
+  const drawWidth = image.width * scale;
+  const drawHeight = image.height * scale;
+  const x = options.x ?? (pageWidth - drawWidth) / 2;
+  const y = options.y ?? (pageHeight - drawHeight) / 2;
+
+  page.drawImage(image, {
+    x,
+    y,
+    width: drawWidth,
+    height: drawHeight
+  });
+
+  return pdfDoc.save();
+}

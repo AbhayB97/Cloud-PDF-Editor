@@ -69,6 +69,13 @@ body {
   border: 1px dashed #c2c8d6;
 }
 
+input[type="number"] {
+  padding: 10px;
+  border-radius: 8px;
+  border: 1px solid #c2c8d6;
+  max-width: 160px;
+}
+
 button {
   align-self: start;
   padding: 10px 16px;
@@ -135,6 +142,13 @@ button:not(.primary) {
 
 .section-title {
   margin: 0;
+  font-weight: 600;
+}
+
+.remember {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   font-weight: 600;
 }
 

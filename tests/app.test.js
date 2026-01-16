@@ -24,4 +24,11 @@ describe("app shell", () => {
     expect(root.querySelector("input[type=\"file\"]")).toBeTruthy();
     expect(root.textContent).toContain("Merge PDFs");
   });
+
+  it("renders export and image controls", () => {
+    const root = setupDom();
+    initApp(root);
+    expect(root.textContent).toContain("Insert Image");
+    expect(root.textContent).toContain("Download PDF");
+  });
 });

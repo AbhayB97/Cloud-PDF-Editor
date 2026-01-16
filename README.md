@@ -102,3 +102,12 @@ Still works years from now
 Doesn’t break when a service shuts down
 
 Respects user ownership of their files
+
+Testing notes
+
+Some offline behaviors require manual verification:
+
+- App loads without network after first load (service worker cache).
+- No network calls occur while offline.
+- "Restore last session" loads the saved PDF when offline.
+- Exported PDF opens correctly and matches the preview.

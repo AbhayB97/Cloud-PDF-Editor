@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { PDFDocument } from "pdf-lib";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 
 vi.mock("pdfjs-dist/build/pdf", () => {
   return {
@@ -26,6 +28,9 @@ async function createPdfWithPageSizes(sizes) {
   });
   return doc.save();
 }
+
+const PNG_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO0W6cQAAAAASUVORK5CYII=";
 
 describe("pdfService", () => {
   it("accepts valid PDF bytes", async () => {
@@ -86,5 +91,23 @@ describe("pdfService", () => {
     const bytes = await createPdfWithPageSizes(sizes);
     const pageOrder = sizes.map((_, index) => index + 1);
     await expect(reorderPdf(bytes, pageOrder)).resolves.toBeTruthy();
+  });
+
+  it("inserts a PNG image", async () => {
+    const { insertImage } = await import("../src/pdfService.js");
+    const bytes = await createPdfWithPageSizes([[600, 800]]);
+    const imageBytes = Uint8Array.from(Buffer.from(PNG_BASE64, "base64"));
+    const updated = await insertImage(bytes, imageBytes, { pageNumber: 1 });
+    const doc = await PDFDocument.load(updated);
+    expect(doc.getPageCount()).toBe(1);
+  });
+
+  it("inserts a JPEG image", async () => {
+    const { insertImage } = await import("../src/pdfService.js");
+    const bytes = await createPdfWithPageSizes([[600, 800]]);
+    const imageBytes = new Uint8Array(readFileSync(resolve("tests/fixtures/1x1.jpg")));
+    const updated = await insertImage(bytes, imageBytes, { pageNumber: 1 });
+    const doc = await PDFDocument.load(updated);
+    expect(doc.getPageCount()).toBe(1);
   });
 });
