@@ -89,6 +89,15 @@ export function convertOverlayRectToPdfRect(overlayRect, pageSize, overlaySize) 
   };
 }
 
+export function convertOverlayPointToPdfPoint(point, pageSize, overlaySize) {
+  const scaleX = pageSize.width / overlaySize.width;
+  const scaleY = pageSize.height / overlaySize.height;
+  return {
+    x: point.x * scaleX,
+    y: pageSize.height - point.y * scaleY
+  };
+}
+
 export async function insertImage(bytes, imageBytes, options = {}) {
   const pdfDoc = await PDFDocument.load(bytes);
   const pageNumber = options.pageNumber ?? 1;
@@ -180,6 +189,16 @@ function parseHexColor(color) {
   if (!color || typeof color !== "string") {
     return rgb(0, 0, 0);
   }
+  const rgbMatch = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
+  if (rgbMatch) {
+    const r = Number.parseInt(rgbMatch[1], 10);
+    const g = Number.parseInt(rgbMatch[2], 10);
+    const b = Number.parseInt(rgbMatch[3], 10);
+    if ([r, g, b].some((value) => Number.isNaN(value))) {
+      return rgb(0, 0, 0);
+    }
+    return rgb(r / 255, g / 255, b / 255);
+  }
   const cleaned = color.startsWith("#") ? color.slice(1) : color;
   if (cleaned.length !== 6) {
     return rgb(0, 0, 0);
@@ -194,10 +213,39 @@ function parseHexColor(color) {
 }
 
 const FONT_MAP = {
-  Helvetica: StandardFonts.Helvetica,
-  Times: StandardFonts.TimesRoman,
-  Courier: StandardFonts.Courier
+  Helvetica: {
+    regular: StandardFonts.Helvetica,
+    bold: StandardFonts.HelveticaBold,
+    italic: StandardFonts.HelveticaOblique,
+    boldItalic: StandardFonts.HelveticaBoldOblique
+  },
+  Times: {
+    regular: StandardFonts.TimesRoman,
+    bold: StandardFonts.TimesBold,
+    italic: StandardFonts.TimesItalic,
+    boldItalic: StandardFonts.TimesBoldItalic
+  },
+  Courier: {
+    regular: StandardFonts.Courier,
+    bold: StandardFonts.CourierBold,
+    italic: StandardFonts.CourierOblique,
+    boldItalic: StandardFonts.CourierBoldOblique
+  }
 };
+
+function resolveFontKey(fontFamily, bold, italic) {
+  const family = FONT_MAP[fontFamily] ?? FONT_MAP.Helvetica;
+  if (bold && italic) {
+    return family.boldItalic;
+  }
+  if (bold) {
+    return family.bold;
+  }
+  if (italic) {
+    return family.italic;
+  }
+  return family.regular;
+}
 
 export async function applyTextAnnotations(bytes, annotations) {
   if (!annotations.length) {
@@ -208,6 +256,16 @@ export async function applyTextAnnotations(bytes, annotations) {
   const fontCache = new Map();
 
   for (const annotation of annotations) {
+    const spans =
+      annotation.spans && annotation.spans.length
+        ? annotation.spans
+        : [
+            {
+              text: annotation.text ?? "",
+              fontSize: annotation.fontSize,
+              color: annotation.color
+            }
+          ];
     const pageIndex = Math.max(
       0,
       Math.min(annotation.pageNumber - 1, pdfDoc.getPageCount() - 1)
@@ -232,21 +290,149 @@ export async function applyTextAnnotations(bytes, annotations) {
       overlaySize
     );
 
-    const fontKey = FONT_MAP[annotation.fontFamily] ?? StandardFonts.Helvetica;
-    if (!fontCache.has(fontKey)) {
-      fontCache.set(fontKey, await pdfDoc.embedFont(fontKey));
-    }
-    const font = fontCache.get(fontKey);
-    const fontSize = annotation.fontSize ?? 16;
-    const color = parseHexColor(annotation.color);
+    const baseFontSize = annotation.fontSize ?? 16;
+    const baseColor = annotation.color ?? "#000000";
+    let cursorX = pdfRect.x;
+    let cursorY = pdfRect.y + pdfRect.height - baseFontSize;
+    let lineHeight = baseFontSize * 1.2;
 
-    page.drawText(annotation.text ?? "", {
+    const advanceLine = () => {
+      cursorY -= lineHeight;
+      cursorX = pdfRect.x;
+      lineHeight = baseFontSize * 1.2;
+    };
+
+    for (const span of spans) {
+      const fontSize = span.fontSize ?? baseFontSize;
+      const color = parseHexColor(span.color ?? baseColor);
+      const fontKey = resolveFontKey(annotation.fontFamily, span.bold, span.italic);
+      if (!fontCache.has(fontKey)) {
+        fontCache.set(fontKey, await pdfDoc.embedFont(fontKey));
+      }
+      const font = fontCache.get(fontKey);
+      const parts = String(span.text ?? "").split("\n");
+      parts.forEach((part, index) => {
+        if (part) {
+          page.drawText(part, {
+            x: cursorX,
+            y: cursorY,
+            size: fontSize,
+            font,
+            color
+          });
+          const width = font.widthOfTextAtSize(part, fontSize);
+          if (span.underline) {
+            const underlineOffset = fontSize * 0.15;
+            page.drawLine({
+              start: { x: cursorX, y: cursorY - underlineOffset },
+              end: { x: cursorX + width, y: cursorY - underlineOffset },
+              thickness: Math.max(1, fontSize / 12),
+              color
+            });
+          }
+          cursorX += width;
+          lineHeight = Math.max(lineHeight, fontSize * 1.2);
+        }
+        if (index < parts.length - 1) {
+          advanceLine();
+        }
+      });
+    }
+  }
+
+  return pdfDoc.save();
+}
+
+export async function applyDrawAnnotations(bytes, annotations) {
+  if (!annotations.length) {
+    return bytes;
+  }
+  const sourceBytes = bytes instanceof Uint8Array ? bytes.slice() : new Uint8Array(bytes);
+  const pdfDoc = await PDFDocument.load(sourceBytes);
+
+  for (const annotation of annotations) {
+    const pageIndex = Math.max(
+      0,
+      Math.min(annotation.pageNumber - 1, pdfDoc.getPageCount() - 1)
+    );
+    const page = pdfDoc.getPage(pageIndex);
+    const { width: pageWidth, height: pageHeight } = page.getSize();
+    if (!annotation.overlayWidth || !annotation.overlayHeight) {
+      throw new Error("Missing overlay size for draw placement.");
+    }
+    if (!annotation.points || annotation.points.length < 2) {
+      continue;
+    }
+    const overlaySize = {
+      width: annotation.overlayWidth,
+      height: annotation.overlayHeight
+    };
+    const scaleX = pageWidth / overlaySize.width;
+    const scaleY = pageHeight / overlaySize.height;
+    const strokeScale = (scaleX + scaleY) / 2;
+    const color = parseHexColor(annotation.strokeColor);
+    for (let i = 1; i < annotation.points.length; i += 1) {
+      const start = convertOverlayPointToPdfPoint(
+        annotation.points[i - 1],
+        { width: pageWidth, height: pageHeight },
+        overlaySize
+      );
+      const end = convertOverlayPointToPdfPoint(
+        annotation.points[i],
+        { width: pageWidth, height: pageHeight },
+        overlaySize
+      );
+      page.drawLine({
+        start,
+        end,
+        thickness: annotation.strokeWidth * strokeScale,
+        color,
+        opacity: annotation.opacity ?? 1
+      });
+    }
+  }
+
+  return pdfDoc.save();
+}
+
+export async function applyHighlightAnnotations(bytes, annotations) {
+  if (!annotations.length) {
+    return bytes;
+  }
+  const sourceBytes = bytes instanceof Uint8Array ? bytes.slice() : new Uint8Array(bytes);
+  const pdfDoc = await PDFDocument.load(sourceBytes);
+
+  for (const annotation of annotations) {
+    const pageIndex = Math.max(
+      0,
+      Math.min(annotation.pageNumber - 1, pdfDoc.getPageCount() - 1)
+    );
+    const page = pdfDoc.getPage(pageIndex);
+    const { width: pageWidth, height: pageHeight } = page.getSize();
+    if (!annotation.overlayWidth || !annotation.overlayHeight) {
+      throw new Error("Missing overlay size for highlight placement.");
+    }
+    const overlaySize = {
+      width: annotation.overlayWidth,
+      height: annotation.overlayHeight
+    };
+    const pdfRect = convertOverlayRectToPdfRect(
+      {
+        x: annotation.x,
+        y: annotation.y,
+        width: annotation.width,
+        height: annotation.height
+      },
+      { width: pageWidth, height: pageHeight },
+      overlaySize
+    );
+    page.drawRectangle({
       x: pdfRect.x,
-      y: pdfRect.y + pdfRect.height - fontSize,
-      size: fontSize,
-      font,
-      color,
-      maxWidth: pdfRect.width
+      y: pdfRect.y,
+      width: pdfRect.width,
+      height: pdfRect.height,
+      color: parseHexColor(annotation.color),
+      opacity: annotation.opacity ?? 0.3
     });
   }
 

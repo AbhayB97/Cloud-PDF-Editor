@@ -230,4 +230,73 @@ describe("pdfService", () => {
     const updated = await applyTextAnnotations(bytes, annotations);
     expect(updated.byteLength).toBeGreaterThan(bytes.byteLength);
   });
+
+  it("applies mixed-style text spans", async () => {
+    const { applyTextAnnotations } = await import("../src/pdfService.js");
+    const bytes = await createPdfWithPageSizes([[600, 800]]);
+    const annotations = [
+      {
+        id: "text-3",
+        pageNumber: 1,
+        x: 40,
+        y: 80,
+        width: 260,
+        height: 60,
+        fontSize: 14,
+        fontFamily: "Helvetica",
+        color: "#111111",
+        spans: [
+          { text: "Bold ", bold: true, fontSize: 16, color: "#111111" },
+          { text: "Italic", italic: true, underline: true, color: "#2563eb" }
+        ],
+        overlayWidth: 300,
+        overlayHeight: 400
+      }
+    ];
+    const updated = await applyTextAnnotations(bytes, annotations);
+    expect(updated.byteLength).toBeGreaterThan(bytes.byteLength);
+  });
+
+  it("applies draw annotations", async () => {
+    const { applyDrawAnnotations } = await import("../src/pdfService.js");
+    const bytes = await createPdfWithPageSizes([[600, 800]]);
+    const annotations = [
+      {
+        id: "draw-1",
+        pageNumber: 1,
+        points: [
+          { x: 10, y: 20 },
+          { x: 40, y: 60 },
+          { x: 80, y: 90 }
+        ],
+        strokeColor: "#2563eb",
+        strokeWidth: 4,
+        overlayWidth: 300,
+        overlayHeight: 400
+      }
+    ];
+    const updated = await applyDrawAnnotations(bytes, annotations);
+    expect(updated.byteLength).toBeGreaterThan(bytes.byteLength);
+  });
+
+  it("applies highlight annotations", async () => {
+    const { applyHighlightAnnotations } = await import("../src/pdfService.js");
+    const bytes = await createPdfWithPageSizes([[600, 800]]);
+    const annotations = [
+      {
+        id: "highlight-1",
+        pageNumber: 1,
+        x: 20,
+        y: 30,
+        width: 120,
+        height: 40,
+        color: "#f59e0b",
+        opacity: 0.3,
+        overlayWidth: 300,
+        overlayHeight: 400
+      }
+    ];
+    const updated = await applyHighlightAnnotations(bytes, annotations);
+    expect(updated.byteLength).toBeGreaterThan(bytes.byteLength);
+  });
 });

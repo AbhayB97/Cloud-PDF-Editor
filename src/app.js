@@ -1,4 +1,6 @@
 import {
+  applyDrawAnnotations,
+  applyHighlightAnnotations,
   applyImageAnnotations,
   applyTextAnnotations,
   isPdfBytes,
@@ -26,10 +28,39 @@ const state = {
   textDefaults: {
     fontSize: 12,
     fontFamily: "Helvetica",
-    color: "#111111"
+    color: "#111111",
+    bold: false,
+    italic: false,
+    underline: false
   },
-  installPromptEvent: null
+  installPromptEvent: null,
+  panePositions: {},
+  paneOpen: {},
+  paneCollapsed: {},
+  drawAnnotations: [],
+  highlightAnnotations: [],
+  selectedTextElement: null,
+  toolDefaults: {
+    draw: { color: "#2563eb", size: 4 },
+    highlight: { color: "#f59e0b", opacity: 0.35 },
+    comment: { color: "#111111" },
+    stamp: { text: "APPROVED", color: "#111111" },
+    mark: { color: "#b91c1c" },
+    signature: { name: "" }
+  }
 };
+
+const TOOL_DEFS = [
+  { id: "select", label: "Select" },
+  { id: "text", label: "Text" },
+  { id: "draw", label: "Draw" },
+  { id: "highlight", label: "Highlight" },
+  { id: "comment", label: "Comment" },
+  { id: "stamp", label: "Stamp" },
+  { id: "mark", label: "Mark" },
+  { id: "image", label: "Image" },
+  { id: "signature", label: "Signature" }
+];
 
 function createButton(label, onClick, className) {
   const button = document.createElement("button");
@@ -64,6 +95,197 @@ function getOverlayBounds(overlay) {
     width: rect.width || overlay.offsetWidth,
     height: rect.height || overlay.offsetHeight
   };
+}
+
+function createLabeledField(labelText, inputEl) {
+  const wrap = document.createElement("label");
+  wrap.className = "field";
+  const label = document.createElement("span");
+  label.textContent = labelText;
+  wrap.append(label, inputEl);
+  return wrap;
+}
+
+function getOverlayPoint(event, overlay) {
+  const rect = overlay.getBoundingClientRect();
+  return {
+    x: event.clientX - rect.left,
+    y: event.clientY - rect.top
+  };
+}
+
+function normalizeColor(color, opacity = 1) {
+  if (!color) {
+    return `rgba(0,0,0,${opacity})`;
+  }
+  if (color.startsWith("rgba")) {
+    return color;
+  }
+  if (color.startsWith("rgb")) {
+    return color.replace("rgb(", "rgba(").replace(")", `,${opacity})`);
+  }
+  const hex = color.startsWith("#") ? color.slice(1) : color;
+  const r = Number.parseInt(hex.slice(0, 2), 16);
+  const g = Number.parseInt(hex.slice(2, 4), 16);
+  const b = Number.parseInt(hex.slice(4, 6), 16);
+  if ([r, g, b].some((value) => Number.isNaN(value))) {
+    return `rgba(0,0,0,${opacity})`;
+  }
+  return `rgba(${r},${g},${b},${opacity})`;
+}
+
+function serializeTextSpans(contentEl, defaults) {
+  const spans = [];
+  const pushSpan = (text, styles) => {
+    if (!text) {
+      return;
+    }
+    spans.push({
+      text,
+      bold: styles.bold,
+      italic: styles.italic,
+      underline: styles.underline,
+      fontSize: styles.fontSize,
+      color: styles.color
+    });
+  };
+
+  const walk = (node, currentStyle) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      pushSpan(node.textContent, currentStyle);
+      return;
+    }
+    if (node.nodeName === "BR") {
+      pushSpan("\n", currentStyle);
+      return;
+    }
+    const nextStyle = { ...currentStyle };
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      const el = node;
+      if (el.style.fontWeight === "bold") {
+        nextStyle.bold = true;
+      }
+      if (el.style.fontStyle === "italic") {
+        nextStyle.italic = true;
+      }
+      if (el.style.textDecorationLine === "underline") {
+        nextStyle.underline = true;
+      }
+      if (el.style.fontSize) {
+        nextStyle.fontSize = Number.parseInt(el.style.fontSize, 10) || currentStyle.fontSize;
+      }
+      if (el.style.color) {
+        nextStyle.color = el.style.color;
+      }
+    }
+    Array.from(node.childNodes).forEach((child) => walk(child, nextStyle));
+    if (node.nodeName === "DIV") {
+      pushSpan("\n", currentStyle);
+    }
+  };
+
+  const base = {
+    bold: defaults.bold,
+    italic: defaults.italic,
+    underline: defaults.underline,
+    fontSize: defaults.fontSize,
+    color: defaults.color
+  };
+  Array.from(contentEl.childNodes).forEach((node) => walk(node, base));
+  return spans.length ? spans : [{ text: "", ...base }];
+}
+
+function applyStyleToSelection(style, contentEl, defaults) {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) {
+    return { updatedDefaults: defaults, updated: false };
+  }
+  const range = selection.getRangeAt(0);
+  if (!contentEl.contains(range.commonAncestorContainer)) {
+    return { updatedDefaults: defaults, updated: false };
+  }
+  if (range.collapsed) {
+    return { updatedDefaults: { ...defaults, ...style }, updated: false };
+  }
+
+  const fragment = range.extractContents();
+  const span = document.createElement("span");
+  if (style.bold !== undefined) {
+    span.style.fontWeight = style.bold ? "bold" : "normal";
+  }
+  if (style.italic !== undefined) {
+    span.style.fontStyle = style.italic ? "italic" : "normal";
+  }
+  if (style.underline !== undefined) {
+    span.style.textDecorationLine = style.underline ? "underline" : "none";
+  }
+  if (style.fontSize !== undefined) {
+    span.style.fontSize = `${style.fontSize}px`;
+  }
+  if (style.color) {
+    span.style.color = style.color;
+  }
+  span.append(fragment);
+  range.insertNode(span);
+  range.setStartAfter(span);
+  range.collapse(true);
+  selection.removeAllRanges();
+  selection.addRange(range);
+  return { updatedDefaults: defaults, updated: true };
+}
+
+function getAnnotationBaseStyle(annotation) {
+  const span = annotation.spans?.[0] ?? {};
+  return {
+    bold: span.bold ?? state.textDefaults.bold,
+    italic: span.italic ?? state.textDefaults.italic,
+    underline: span.underline ?? state.textDefaults.underline,
+    fontSize: span.fontSize ?? annotation.fontSize ?? state.textDefaults.fontSize,
+    color: span.color ?? annotation.color ?? state.textDefaults.color
+  };
+}
+
+function renderTextContent(contentEl, spans, baseStyle) {
+  contentEl.innerHTML = "";
+  spans.forEach((span) => {
+    const effective = {
+      bold: span.bold ?? baseStyle.bold,
+      italic: span.italic ?? baseStyle.italic,
+      underline: span.underline ?? baseStyle.underline,
+      fontSize: span.fontSize ?? baseStyle.fontSize,
+      color: span.color ?? baseStyle.color
+    };
+    const spanEl = document.createElement("span");
+    if (effective.bold) {
+      spanEl.style.fontWeight = "bold";
+    }
+    if (effective.italic) {
+      spanEl.style.fontStyle = "italic";
+    }
+    if (effective.underline) {
+      spanEl.style.textDecorationLine = "underline";
+    }
+    if (effective.fontSize) {
+      spanEl.style.fontSize = `${effective.fontSize}px`;
+    }
+    if (effective.color) {
+      spanEl.style.color = effective.color;
+    }
+    const parts = String(span.text ?? "").split("\n");
+    parts.forEach((part, index) => {
+      if (part) {
+        spanEl.append(document.createTextNode(part));
+      }
+      if (index < parts.length - 1) {
+        spanEl.append(document.createElement("br"));
+      }
+    });
+    contentEl.append(spanEl);
+  });
+}
+
+function createSvgElement(tagName) {
+  return document.createElementNS("http://www.w3.org/2000/svg", tagName);
 }
 
 function getPreferredTheme() {
@@ -115,12 +337,20 @@ function updatePageLabel(pageLabel) {
   pageLabel.textContent = `Page ${state.currentPage} of ${state.pageCount}`;
 }
 
-async function refreshViewer(canvas, overlay, pageLabel, statusEl) {
+async function refreshViewer(
+  canvas,
+  overlay,
+  drawLayer,
+  highlightLayer,
+  pageLabel,
+  statusEl
+) {
   if (!state.pdfDoc || !state.pageCount) {
     return;
   }
   try {
     await renderPageToCanvas(state.pdfDoc, state.currentPage, canvas);
+    renderInkLayers(drawLayer, highlightLayer, overlay);
     updatePageLabel(pageLabel);
     renderAnnotations(overlay, statusEl);
   } catch (error) {
@@ -197,6 +427,59 @@ function renderAssetList(assetList, statusEl) {
 
     item.append(preview, label);
     assetList.append(item);
+  });
+}
+
+function renderInkLayers(drawLayer, highlightLayer, overlay) {
+  if (!drawLayer || !highlightLayer || !overlay) {
+    return;
+  }
+  const { width, height } = getOverlayBounds(overlay);
+  const layers = [drawLayer, highlightLayer];
+  layers.forEach((layer) => {
+    layer.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    layer.setAttribute("width", width);
+    layer.setAttribute("height", height);
+    layer.innerHTML = "";
+  });
+
+  const highlightItems = state.highlightAnnotations.filter(
+    (annotation) => annotation.pageNumber === state.currentPage
+  );
+  highlightItems.forEach((annotation) => {
+    const rect = createSvgElement("rect");
+    rect.setAttribute("x", annotation.x);
+    rect.setAttribute("y", annotation.y);
+    rect.setAttribute("width", annotation.width);
+    rect.setAttribute("height", annotation.height);
+    rect.setAttribute("fill", annotation.color);
+    rect.setAttribute("fill-opacity", annotation.opacity ?? 0.3);
+    rect.dataset.role = "highlight-rect";
+    highlightLayer.append(rect);
+  });
+
+  const drawItems = state.drawAnnotations.filter(
+    (annotation) => annotation.pageNumber === state.currentPage
+  );
+  drawItems.forEach((annotation) => {
+    if (!annotation.points || annotation.points.length < 2) {
+      return;
+    }
+    const path = createSvgElement("path");
+    const d = annotation.points
+      .map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`)
+      .join(" ");
+    path.setAttribute("d", d);
+    path.setAttribute("fill", "none");
+    path.setAttribute("stroke", annotation.strokeColor);
+    path.setAttribute("stroke-width", annotation.strokeWidth);
+    path.setAttribute("stroke-linecap", "round");
+    path.setAttribute("stroke-linejoin", "round");
+    if (annotation.opacity !== undefined) {
+      path.setAttribute("stroke-opacity", annotation.opacity);
+    }
+    path.dataset.role = "draw-path";
+    drawLayer.append(path);
   });
 }
 
@@ -327,6 +610,20 @@ function renderTextAnnotations(overlay, statusEl) {
     (annotation) => annotation.pageNumber === state.currentPage
   );
   current.forEach((annotation) => {
+    const baseStyle = getAnnotationBaseStyle(annotation);
+    if (annotation.fontSize === undefined) {
+      annotation.fontSize = baseStyle.fontSize;
+    }
+    if (!annotation.color) {
+      annotation.color = baseStyle.color;
+    }
+    if (!annotation.fontFamily) {
+      annotation.fontFamily = state.textDefaults.fontFamily;
+    }
+    const spans =
+      annotation.spans && annotation.spans.length
+        ? annotation.spans
+        : [{ text: annotation.text ?? "", ...baseStyle }];
     const wrapper = document.createElement("div");
     wrapper.className = "text-annotation";
     wrapper.tabIndex = 0;
@@ -342,9 +639,9 @@ function renderTextAnnotations(overlay, statusEl) {
 
     const content = document.createElement("div");
     content.className = "text-content";
-    content.contentEditable = "true";
+    content.contentEditable = state.activeTool === "text";
     content.spellcheck = false;
-    content.textContent = annotation.text;
+    renderTextContent(content, spans, baseStyle);
 
     const handle = document.createElement("div");
     handle.className = "resize-handle";
@@ -432,10 +729,23 @@ function attachTextInteractions(wrapper, content, annotation, overlay, statusEl)
 
   wrapper.addEventListener("focusin", () => {
     state.selectedTextId = annotation.id;
+    state.selectedTextElement = content;
   });
 
   content.addEventListener("input", () => {
+    const baseStyle = getAnnotationBaseStyle(annotation);
     annotation.text = content.textContent ?? "";
+    annotation.spans = serializeTextSpans(content, baseStyle);
+  });
+
+  content.addEventListener("focus", () => {
+    state.selectedTextElement = content;
+  });
+
+  content.addEventListener("blur", () => {
+    if (state.selectedTextElement === content) {
+      state.selectedTextElement = null;
+    }
   });
 
   wrapper.addEventListener("keydown", (event) => {
@@ -443,6 +753,10 @@ function attachTextInteractions(wrapper, content, annotation, overlay, statusEl)
       return;
     }
     state.textAnnotations = state.textAnnotations.filter((item) => item.id !== annotation.id);
+    if (state.selectedTextId === annotation.id) {
+      state.selectedTextId = null;
+      state.selectedTextElement = null;
+    }
     wrapper.remove();
     setStatus(statusEl, "Text removed.");
   });
@@ -457,6 +771,8 @@ async function loadPdfBytes(
   statusEl,
   canvas,
   overlay,
+  drawLayer,
+  highlightLayer,
   pageLabel,
   pageList,
   applyButton
@@ -479,14 +795,28 @@ async function loadPdfBytes(
   state.imageAssets = [];
   state.textAnnotations = [];
   state.selectedTextId = null;
+  state.selectedTextElement = null;
+  state.drawAnnotations = [];
+  state.highlightAnnotations = [];
   state.textDefaults = {
     fontSize: 12,
     fontFamily: "Helvetica",
-    color: "#111111"
+    color: "#111111",
+    bold: false,
+    italic: false,
+    underline: false
+  };
+  state.toolDefaults = {
+    draw: { color: "#2563eb", size: 4 },
+    highlight: { color: "#f59e0b", opacity: 0.35 },
+    comment: { color: "#111111" },
+    stamp: { text: "APPROVED", color: "#111111" },
+    mark: { color: "#b91c1c" },
+    signature: { name: "" }
   };
   renderPageList(pageList, applyButton);
   updatePageLabel(pageLabel);
-  await refreshViewer(canvas, overlay, pageLabel, statusEl);
+  await refreshViewer(canvas, overlay, drawLayer, highlightLayer, pageLabel, statusEl);
   setStatus(statusEl, "PDF loaded successfully.");
 }
 
@@ -499,12 +829,73 @@ export function initApp(root) {
   const container = document.createElement("div");
   container.className = "app-shell";
 
+  const topBar = document.createElement("div");
+  topBar.className = "top-bar";
+
+  const brand = document.createElement("div");
+  brand.className = "brand";
   const title = document.createElement("h1");
   title.textContent = "Cloud PDF Editor";
+  brand.append(title);
 
-  const subtitle = document.createElement("p");
-  subtitle.className = "app-subtitle";
-  subtitle.textContent = "Local-first PDF editing. Files never leave your device.";
+  const fileActions = document.createElement("div");
+  fileActions.className = "file-actions";
+
+  const loadInput = document.createElement("input");
+  loadInput.type = "file";
+  loadInput.accept = "application/pdf";
+  loadInput.dataset.role = "pdf-load";
+  loadInput.hidden = true;
+
+  const mergeInput = document.createElement("input");
+  mergeInput.type = "file";
+  mergeInput.accept = "application/pdf";
+  mergeInput.multiple = true;
+  mergeInput.dataset.role = "pdf-merge";
+  mergeInput.hidden = true;
+
+  const loadButton = createButton("Load PDF", () => {
+    loadInput.click();
+  }, "primary");
+
+  const mergeButton = createButton("Merge PDFs", () => {
+    mergeInput.click();
+  });
+
+  fileActions.append(loadButton, mergeButton, loadInput, mergeInput);
+
+  const toolBar = document.createElement("div");
+  toolBar.className = "tool-bar";
+
+  const toolButtons = new Map();
+  let renderPanes = () => {};
+  TOOL_DEFS.forEach((tool) => {
+    const button = createButton(tool.label, () => {
+      setActiveTool(tool.id);
+      state.paneOpen[tool.id] = tool.id !== "select";
+      renderPanes();
+    });
+    button.dataset.role = `tool-${tool.id}`;
+    toolButtons.set(tool.id, button);
+    toolBar.append(button);
+  });
+
+  function setActiveTool(toolId) {
+    state.activeTool = toolId;
+    toolButtons.forEach((button, id) => {
+      button.dataset.active = id === toolId ? "true" : "false";
+    });
+    if (overlay) {
+      overlay.dataset.mode = toolId;
+      const editable = toolId === "text";
+      overlay.querySelectorAll(".text-content").forEach((node) => {
+        node.contentEditable = editable;
+      });
+    }
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "top-actions";
 
   const trustBox = document.createElement("div");
   trustBox.className = "trust-box";
@@ -522,6 +913,56 @@ export function initApp(root) {
   const status = document.createElement("p");
   status.className = "status";
   status.textContent = "Load a PDF to begin.";
+
+  const exportButton = createButton("Export PDF", async () => {
+    if (!state.currentBytes) {
+      setStatus(status, "Load a PDF before exporting.", true);
+      return;
+    }
+    try {
+      let exportBytes = state.currentBytes;
+      if (state.highlightAnnotations.length > 0) {
+        exportBytes = await applyHighlightAnnotations(exportBytes, state.highlightAnnotations);
+      }
+      if (state.imageAnnotations.length > 0) {
+        exportBytes = await applyImageAnnotations(
+          exportBytes,
+          state.imageAssets,
+          state.imageAnnotations
+        );
+      }
+      if (state.textAnnotations.length > 0) {
+        exportBytes = await applyTextAnnotations(exportBytes, state.textAnnotations);
+      }
+      if (state.drawAnnotations.length > 0) {
+        exportBytes = await applyDrawAnnotations(exportBytes, state.drawAnnotations);
+      }
+      const blob = new Blob([exportBytes], { type: "application/pdf" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "edited.pdf";
+      document.body.append(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      setStatus(status, "Export started.");
+    } catch (error) {
+      setStatus(status, `Export failed: ${error.message}`, true);
+    }
+  }, "primary");
+  exportButton.dataset.role = "export-button";
+
+  const settingsPanel = document.createElement("div");
+  settingsPanel.className = "settings-panel";
+  settingsPanel.hidden = true;
+
+  const settingsButton = createButton("Settings", () => {
+    settingsPanel.hidden = !settingsPanel.hidden;
+  });
+  settingsButton.dataset.role = "settings-button";
+
+  actions.append(exportButton, settingsButton);
 
   const rememberWrap = document.createElement("label");
   rememberWrap.className = "remember";
@@ -601,6 +1042,8 @@ export function initApp(root) {
         status,
         canvas,
         overlay,
+        drawLayer,
+        highlightLayer,
         pageLabel,
         pageList,
         applyReorderButton
@@ -611,18 +1054,11 @@ export function initApp(root) {
     }
   });
 
-  const loadGroup = document.createElement("section");
-  loadGroup.className = "panel";
-  const loadLabel = document.createElement("label");
-  loadLabel.textContent = "Load a PDF";
-  const loadInput = document.createElement("input");
-  loadInput.type = "file";
-  loadInput.accept = "application/pdf";
-  loadInput.dataset.role = "pdf-load";
-  const loadButton = createButton("Load PDF", async () => {
+  settingsPanel.append(rememberWrap, restoreButton, themeGroup, installGroup);
+
+  loadInput.addEventListener("change", async () => {
     const file = loadInput.files?.[0];
     if (!file) {
-      setStatus(status, "Choose a PDF file to load.", true);
       return;
     }
     if (!isPdfFile(file)) {
@@ -636,6 +1072,8 @@ export function initApp(root) {
         status,
         canvas,
         overlay,
+        drawLayer,
+        highlightLayer,
         pageLabel,
         pageList,
         applyReorderButton
@@ -645,20 +1083,12 @@ export function initApp(root) {
       }
     } catch (error) {
       setStatus(status, `Failed to load PDF: ${error.message}`, true);
+    } finally {
+      loadInput.value = "";
     }
   });
-  loadGroup.append(loadLabel, loadInput, loadButton);
 
-  const mergeGroup = document.createElement("section");
-  mergeGroup.className = "panel";
-  const mergeLabel = document.createElement("label");
-  mergeLabel.textContent = "Merge PDFs";
-  const mergeInput = document.createElement("input");
-  mergeInput.type = "file";
-  mergeInput.accept = "application/pdf";
-  mergeInput.multiple = true;
-  mergeInput.dataset.role = "pdf-merge";
-  const mergeButton = createButton("Merge Selected PDFs", async () => {
+  mergeInput.addEventListener("change", async () => {
     const files = Array.from(mergeInput.files ?? []);
     if (files.length < 2) {
       setStatus(status, "Select at least two PDF files to merge.", true);
@@ -679,6 +1109,8 @@ export function initApp(root) {
         status,
         canvas,
         overlay,
+        drawLayer,
+        highlightLayer,
         pageLabel,
         pageList,
         applyReorderButton
@@ -689,12 +1121,13 @@ export function initApp(root) {
       }
     } catch (error) {
       setStatus(status, `Failed to merge PDFs: ${error.message}`, true);
+    } finally {
+      mergeInput.value = "";
     }
   });
-  mergeGroup.append(mergeLabel, mergeInput, mergeButton);
 
   const viewerGroup = document.createElement("section");
-  viewerGroup.className = "panel viewer";
+  viewerGroup.className = "document-workspace";
   const pageLabel = document.createElement("p");
   pageLabel.className = "page-label";
   pageLabel.textContent = "No PDF loaded";
@@ -702,16 +1135,107 @@ export function initApp(root) {
   const canvas = document.createElement("canvas");
   canvas.className = "pdf-canvas";
 
+  const highlightLayer = createSvgElement("svg");
+  highlightLayer.classList.add("ink-layer", "highlight-layer");
+  highlightLayer.dataset.role = "highlight-layer";
+  highlightLayer.setAttribute("aria-hidden", "true");
+
+  const drawLayer = createSvgElement("svg");
+  drawLayer.classList.add("ink-layer", "draw-layer");
+  drawLayer.dataset.role = "draw-layer";
+  drawLayer.setAttribute("aria-hidden", "true");
+
   const overlay = document.createElement("div");
   overlay.className = "page-overlay";
   overlay.dataset.role = "page-overlay";
   overlay.dataset.mode = state.activeTool;
+  let activeDraw = null;
+  let activeHighlight = null;
   overlay.addEventListener("dragover", (event) => {
     event.preventDefault();
     overlay.classList.add("drag-over");
   });
   overlay.addEventListener("dragleave", () => {
     overlay.classList.remove("drag-over");
+  });
+
+  overlay.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) {
+      return;
+    }
+    if (state.activeTool !== "draw" && state.activeTool !== "highlight") {
+      return;
+    }
+    event.preventDefault();
+    if (!state.currentBytes) {
+      setStatus(status, "Load a PDF before drawing.", true);
+      return;
+    }
+    const bounds = getOverlayBounds(overlay);
+    if (!bounds.width || !bounds.height) {
+      setStatus(status, "Overlay not ready yet. Try again.", true);
+      return;
+    }
+    const start = getOverlayPoint(event, overlay);
+    if (state.activeTool === "draw") {
+      activeDraw = {
+        id: createId("draw"),
+        pageNumber: state.currentPage,
+        points: [start],
+        strokeColor: state.toolDefaults.draw.color,
+        strokeWidth: state.toolDefaults.draw.size,
+        opacity: 1,
+        overlayWidth: bounds.width,
+        overlayHeight: bounds.height
+      };
+      state.drawAnnotations = [...state.drawAnnotations, activeDraw];
+    } else if (state.activeTool === "highlight") {
+      activeHighlight = {
+        id: createId("highlight"),
+        pageNumber: state.currentPage,
+        x: start.x,
+        y: start.y,
+        width: 0,
+        height: 0,
+        color: state.toolDefaults.highlight.color,
+        opacity: state.toolDefaults.highlight.opacity,
+        overlayWidth: bounds.width,
+        overlayHeight: bounds.height
+      };
+      state.highlightAnnotations = [...state.highlightAnnotations, activeHighlight];
+    }
+    renderInkLayers(drawLayer, highlightLayer, overlay);
+
+    const onMove = (moveEvent) => {
+      if (state.activeTool === "draw" && activeDraw) {
+        activeDraw.points.push(getOverlayPoint(moveEvent, overlay));
+        renderInkLayers(drawLayer, highlightLayer, overlay);
+      }
+      if (state.activeTool === "highlight" && activeHighlight) {
+        const current = getOverlayPoint(moveEvent, overlay);
+        activeHighlight.x = Math.min(start.x, current.x);
+        activeHighlight.y = Math.min(start.y, current.y);
+        activeHighlight.width = Math.abs(current.x - start.x);
+        activeHighlight.height = Math.abs(current.y - start.y);
+        renderInkLayers(drawLayer, highlightLayer, overlay);
+      }
+    };
+
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      if (activeHighlight && (activeHighlight.width < 2 || activeHighlight.height < 2)) {
+        state.highlightAnnotations = state.highlightAnnotations.filter(
+          (item) => item.id !== activeHighlight.id
+        );
+      }
+      activeDraw = null;
+      activeHighlight = null;
+      renderInkLayers(drawLayer, highlightLayer, overlay);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
   });
 
   overlay.addEventListener("click", (event) => {
@@ -734,6 +1258,13 @@ export function initApp(root) {
     }
     const x = clamp(event.clientX - rect.left, 0, overlayWidth - 160);
     const y = clamp(event.clientY - rect.top, 0, overlayHeight - 32);
+    const baseStyle = {
+      bold: state.textDefaults.bold,
+      italic: state.textDefaults.italic,
+      underline: state.textDefaults.underline,
+      fontSize: state.textDefaults.fontSize,
+      color: state.textDefaults.color
+    };
     const annotation = {
       id: createId("text"),
       pageNumber: state.currentPage,
@@ -745,6 +1276,7 @@ export function initApp(root) {
       fontSize: state.textDefaults.fontSize,
       fontFamily: state.textDefaults.fontFamily,
       color: state.textDefaults.color,
+      spans: [{ text: "", ...baseStyle }],
       overlayWidth,
       overlayHeight
     };
@@ -811,20 +1343,20 @@ export function initApp(root) {
 
   const canvasWrap = document.createElement("div");
   canvasWrap.className = "canvas-wrap";
-  canvasWrap.append(canvas, overlay);
+  canvasWrap.append(canvas, highlightLayer, overlay, drawLayer);
 
   const nav = document.createElement("div");
   nav.className = "nav";
   const prevButton = createButton("Previous", async () => {
     if (state.currentPage > 1) {
       state.currentPage -= 1;
-      await refreshViewer(canvas, overlay, pageLabel, status);
+      await refreshViewer(canvas, overlay, drawLayer, highlightLayer, pageLabel, status);
     }
   });
   const nextButton = createButton("Next", async () => {
     if (state.currentPage < state.pageCount) {
       state.currentPage += 1;
-      await refreshViewer(canvas, overlay, pageLabel, status);
+      await refreshViewer(canvas, overlay, drawLayer, highlightLayer, pageLabel, status);
     }
   });
   nav.append(prevButton, nextButton);
@@ -891,12 +1423,6 @@ export function initApp(root) {
   const textTitle = document.createElement("p");
   textTitle.className = "section-title";
   textTitle.textContent = "Text Tool";
-  const textToggle = createButton("Add Text", () => {
-    state.activeTool = state.activeTool === "text" ? "select" : "text";
-    overlay.dataset.mode = state.activeTool;
-    textToggle.textContent = state.activeTool === "text" ? "Exit Text Tool" : "Add Text";
-  }, "primary");
-  textToggle.dataset.role = "text-tool-toggle";
 
   const fontSizeInput = document.createElement("input");
   fontSizeInput.type = "number";
@@ -919,6 +1445,25 @@ export function initApp(root) {
   colorInput.value = state.textDefaults.color;
   colorInput.dataset.role = "text-color";
 
+  const styleRow = document.createElement("div");
+  styleRow.className = "text-style-controls";
+  const boldButton = createButton("B", () => {
+    applyTextStyleChange({ bold: boldButton.dataset.active !== "true" });
+  });
+  boldButton.dataset.role = "text-bold";
+  boldButton.className = "text-style-toggle";
+  const italicButton = createButton("I", () => {
+    applyTextStyleChange({ italic: italicButton.dataset.active !== "true" });
+  });
+  italicButton.dataset.role = "text-italic";
+  italicButton.className = "text-style-toggle";
+  const underlineButton = createButton("U", () => {
+    applyTextStyleChange({ underline: underlineButton.dataset.active !== "true" });
+  });
+  underlineButton.dataset.role = "text-underline";
+  underlineButton.className = "text-style-toggle";
+  styleRow.append(boldButton, italicButton, underlineButton);
+
   const removeTextButton = createButton("Remove Text", () => {
     if (!state.selectedTextId) {
       setStatus(status, "Select a text annotation to remove.", true);
@@ -928,58 +1473,118 @@ export function initApp(root) {
       (item) => item.id !== state.selectedTextId
     );
     state.selectedTextId = null;
+    state.selectedTextElement = null;
     renderAnnotations(overlay, status);
     setStatus(status, "Text removed.");
   });
 
-  const updateSelectedText = (update, updateDefault) => {
-    if (!state.selectedTextId) {
-      updateDefault();
-      return;
-    }
+  const setToggleState = (button, isActive) => {
+    button.dataset.active = isActive ? "true" : "false";
+  };
+
+  const updateTextControls = (style) => {
+    fontSizeInput.value = String(style.fontSize);
+    colorInput.value = style.color;
+    setToggleState(boldButton, !!style.bold);
+    setToggleState(italicButton, !!style.italic);
+    setToggleState(underlineButton, !!style.underline);
+  };
+
+  const applyTextStyleChange = (style) => {
     const annotation = state.textAnnotations.find((item) => item.id === state.selectedTextId);
     if (!annotation) {
-      updateDefault();
+      if (style.bold !== undefined) {
+        state.textDefaults.bold = style.bold;
+      }
+      if (style.italic !== undefined) {
+        state.textDefaults.italic = style.italic;
+      }
+      if (style.underline !== undefined) {
+        state.textDefaults.underline = style.underline;
+      }
+      if (style.fontSize !== undefined) {
+        state.textDefaults.fontSize = style.fontSize;
+      }
+      if (style.color) {
+        state.textDefaults.color = style.color;
+      }
+      updateTextControls(state.textDefaults);
       return;
     }
-    update(annotation);
+
+    const contentEl = state.selectedTextElement;
+    const selection = window.getSelection();
+    if (
+      contentEl &&
+      selection &&
+      selection.rangeCount > 0 &&
+      contentEl.contains(selection.getRangeAt(0).commonAncestorContainer) &&
+      !selection.isCollapsed
+    ) {
+      applyStyleToSelection(style, contentEl, getAnnotationBaseStyle(annotation));
+      annotation.text = contentEl.textContent ?? "";
+      annotation.spans = serializeTextSpans(contentEl, getAnnotationBaseStyle(annotation));
+      return;
+    }
+
+    if (!annotation.spans || annotation.spans.length === 0) {
+      const baseStyle = getAnnotationBaseStyle(annotation);
+      annotation.spans = [{ text: annotation.text ?? "", ...baseStyle }];
+    }
+
+    const applyToSpan = (span) => {
+      const next = { ...span };
+      if (style.bold !== undefined) {
+        next.bold = style.bold;
+      }
+      if (style.italic !== undefined) {
+        next.italic = style.italic;
+      }
+      if (style.underline !== undefined) {
+        next.underline = style.underline;
+      }
+      if (style.fontSize !== undefined) {
+        next.fontSize = style.fontSize;
+      }
+      if (style.color) {
+        next.color = style.color;
+      }
+      return next;
+    };
+
+    annotation.spans = (annotation.spans ?? []).map(applyToSpan);
+    if (style.fontSize !== undefined) {
+      annotation.fontSize = style.fontSize;
+    }
+    if (style.color) {
+      annotation.color = style.color;
+    }
     renderAnnotations(overlay, status);
+    state.selectedTextElement = overlay.querySelector(
+      `[data-annotation-id="${annotation.id}"] .text-content`
+    );
+    updateTextControls(getAnnotationBaseStyle(annotation));
   };
 
   fontSizeInput.addEventListener("change", () => {
     const value = Number.parseInt(fontSizeInput.value, 10);
-    updateSelectedText(
-      (annotation) => {
-        annotation.fontSize = Number.isFinite(value) ? value : annotation.fontSize;
-      },
-      () => {
-        if (Number.isFinite(value)) {
-          state.textDefaults.fontSize = value;
-        }
-      }
-    );
+    if (Number.isFinite(value)) {
+      applyTextStyleChange({ fontSize: value });
+    }
   });
 
   fontFamilySelect.addEventListener("change", () => {
-    updateSelectedText(
-      (annotation) => {
-        annotation.fontFamily = fontFamilySelect.value;
-      },
-      () => {
-        state.textDefaults.fontFamily = fontFamilySelect.value;
-      }
-    );
+    const annotation = state.textAnnotations.find((item) => item.id === state.selectedTextId);
+    if (annotation) {
+      annotation.fontFamily = fontFamilySelect.value;
+      renderAnnotations(overlay, status);
+      return;
+    }
+    state.textDefaults.fontFamily = fontFamilySelect.value;
   });
 
   colorInput.addEventListener("input", () => {
-    updateSelectedText(
-      (annotation) => {
-        annotation.color = colorInput.value;
-      },
-      () => {
-        state.textDefaults.color = colorInput.value;
-      }
-    );
+    applyTextStyleChange({ color: colorInput.value });
   });
 
   const palette = document.createElement("div");
@@ -1007,15 +1612,17 @@ export function initApp(root) {
       return;
     }
     state.selectedTextId = annotation.id;
-    fontSizeInput.value = String(annotation.fontSize);
-    fontFamilySelect.value = annotation.fontFamily;
-    colorInput.value = annotation.color;
+    state.selectedTextElement = wrapper.querySelector(".text-content");
+    fontFamilySelect.value = annotation.fontFamily ?? state.textDefaults.fontFamily;
+    updateTextControls(getAnnotationBaseStyle(annotation));
   });
+
+  updateTextControls(state.textDefaults);
 
   textToolGroup.append(
     textTitle,
-    textToggle,
     fontSizeInput,
+    styleRow,
     fontFamilySelect,
     colorInput,
     palette,
@@ -1040,6 +1647,8 @@ export function initApp(root) {
       const currentAssets = state.imageAssets;
       const currentImageAnnotations = state.imageAnnotations;
       const currentTextAnnotations = state.textAnnotations;
+      const currentDrawAnnotations = state.drawAnnotations;
+      const currentHighlightAnnotations = state.highlightAnnotations;
       const pageMapping = new Map();
       state.pageOrder.forEach((oldPageNumber, index) => {
         pageMapping.set(oldPageNumber, index + 1);
@@ -1052,12 +1661,22 @@ export function initApp(root) {
         ...annotation,
         pageNumber: pageMapping.get(annotation.pageNumber) ?? annotation.pageNumber
       }));
+      const remappedDrawAnnotations = currentDrawAnnotations.map((annotation) => ({
+        ...annotation,
+        pageNumber: pageMapping.get(annotation.pageNumber) ?? annotation.pageNumber
+      }));
+      const remappedHighlightAnnotations = currentHighlightAnnotations.map((annotation) => ({
+        ...annotation,
+        pageNumber: pageMapping.get(annotation.pageNumber) ?? annotation.pageNumber
+      }));
       const reorderedBytes = await reorderPdf(state.currentBytes, state.pageOrder);
       await loadPdfBytes(
         reorderedBytes,
         status,
         canvas,
         overlay,
+        drawLayer,
+        highlightLayer,
         pageLabel,
         pageList,
         applyReorderButton
@@ -1065,7 +1684,10 @@ export function initApp(root) {
       state.imageAssets = currentAssets;
       state.imageAnnotations = remappedImageAnnotations;
       state.textAnnotations = remappedTextAnnotations;
+      state.drawAnnotations = remappedDrawAnnotations;
+      state.highlightAnnotations = remappedHighlightAnnotations;
       renderAssetList(assetList, status);
+      renderInkLayers(drawLayer, highlightLayer, overlay);
       renderAnnotations(overlay, status);
       setStatus(status, "Reorder applied.");
       if (rememberToggle.checked) {
@@ -1078,66 +1700,229 @@ export function initApp(root) {
 
   reorderGroup.append(reorderTitle, pageList, applyReorderButton);
 
-  const exportGroup = document.createElement("section");
-  exportGroup.className = "panel";
-  const exportTitle = document.createElement("p");
-  exportTitle.className = "section-title";
-  exportTitle.textContent = "Export";
-  const exportButton = createButton("Download PDF", async () => {
-    if (!state.currentBytes) {
-      setStatus(status, "Load a PDF before exporting.", true);
-      return;
-    }
-    try {
-      let exportBytes = state.currentBytes;
-      if (state.imageAnnotations.length > 0) {
-        exportBytes = await applyImageAnnotations(
-          exportBytes,
-          state.imageAssets,
-          state.imageAnnotations
-        );
-      }
-      if (state.textAnnotations.length > 0) {
-        exportBytes = await applyTextAnnotations(exportBytes, state.textAnnotations);
-      }
-      const blob = new Blob([exportBytes], { type: "application/pdf" });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = "edited.pdf";
-      document.body.append(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
-      setStatus(status, "Export started.");
-    } catch (error) {
-      setStatus(status, `Export failed: ${error.message}`, true);
-    }
-  }, "primary");
-  exportGroup.append(exportTitle, exportButton);
-
-  const sidePanel = document.createElement("div");
-  sidePanel.className = "side-panel";
-  sidePanel.append(assetGroup, textToolGroup);
-
   const workspace = document.createElement("div");
   workspace.className = "workspace";
-  workspace.append(sidePanel, viewerGroup);
 
-  container.append(
-    title,
-    subtitle,
-    trustBox,
-    status,
-    rememberWrap,
-    restoreButton,
-    themeGroup,
-    installGroup,
-    loadGroup,
-    mergeGroup,
-    workspace,
-    reorderGroup,
-    exportGroup
-  );
+  const paneRoot = document.createElement("div");
+  paneRoot.className = "pane-root";
+
+  const createPane = (id, titleText, content) => {
+    const pane = document.createElement("section");
+    pane.className = "floating-pane";
+    pane.dataset.role = `pane-${id}`;
+    const header = document.createElement("div");
+    header.className = "pane-header";
+    const title = document.createElement("span");
+    title.textContent = titleText;
+    const controls = document.createElement("div");
+    controls.className = "pane-controls";
+    const collapseButton = createButton("–", () => {
+      state.paneCollapsed[id] = !state.paneCollapsed[id];
+      body.hidden = !!state.paneCollapsed[id];
+    });
+    collapseButton.className = "pane-control";
+    const closeButton = createButton("×", () => {
+      state.paneOpen[id] = false;
+      renderPanes();
+    });
+    closeButton.className = "pane-control";
+    controls.append(collapseButton, closeButton);
+    header.append(title, controls);
+
+    const body = document.createElement("div");
+    body.className = "pane-body";
+    body.append(content);
+
+    header.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) {
+        return;
+      }
+      event.preventDefault();
+      const startX = event.clientX;
+      const startY = event.clientY;
+      const rect = pane.getBoundingClientRect();
+      const originLeft = rect.left;
+      const originTop = rect.top;
+
+      const onMove = (moveEvent) => {
+        const dx = moveEvent.clientX - startX;
+        const dy = moveEvent.clientY - startY;
+        const left = Math.max(16, originLeft + dx);
+        const top = Math.max(16, originTop + dy);
+        pane.style.left = `${left}px`;
+        pane.style.top = `${top}px`;
+        state.panePositions[id] = { left, top };
+      };
+
+      const onUp = () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+      };
+
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+    });
+
+    pane.append(header, body);
+    return pane;
+  };
+
+  const placeholderPane = (text, fields = []) => {
+    const panel = document.createElement("div");
+    panel.className = "panel";
+    const message = document.createElement("p");
+    message.className = "muted";
+    message.textContent = text;
+    panel.append(message);
+    fields.forEach((field) => panel.append(field));
+    return panel;
+  };
+
+  const drawPane = () => {
+    const color = document.createElement("input");
+    color.type = "color";
+    color.value = state.toolDefaults.draw.color;
+    color.addEventListener("input", () => {
+      state.toolDefaults.draw.color = color.value;
+    });
+    const size = document.createElement("input");
+    size.type = "number";
+    size.min = "1";
+    size.max = "20";
+    size.value = String(state.toolDefaults.draw.size);
+    size.addEventListener("change", () => {
+      const next = Number.parseInt(size.value, 10);
+      if (Number.isFinite(next)) {
+        state.toolDefaults.draw.size = next;
+      }
+    });
+    return placeholderPane("Click and drag on the page to draw.", [
+      createLabeledField("Stroke color", color),
+      createLabeledField("Stroke size", size)
+    ]);
+  };
+
+  const highlightPane = () => {
+    const color = document.createElement("input");
+    color.type = "color";
+    color.value = state.toolDefaults.highlight.color;
+    color.addEventListener("input", () => {
+      state.toolDefaults.highlight.color = color.value;
+    });
+    const opacity = document.createElement("input");
+    opacity.type = "range";
+    opacity.min = "0.1";
+    opacity.max = "0.8";
+    opacity.step = "0.05";
+    opacity.value = String(state.toolDefaults.highlight.opacity);
+    opacity.addEventListener("input", () => {
+      state.toolDefaults.highlight.opacity = Number(opacity.value);
+    });
+    return placeholderPane("Click and drag on the page to highlight.", [
+      createLabeledField("Tint color", color),
+      createLabeledField("Opacity", opacity)
+    ]);
+  };
+
+  const commentPane = () => {
+    const color = document.createElement("input");
+    color.type = "color";
+    color.value = state.toolDefaults.comment.color;
+    color.addEventListener("input", () => {
+      state.toolDefaults.comment.color = color.value;
+    });
+    return placeholderPane("Comment tools will appear here.", [
+      createLabeledField("Text color", color)
+    ]);
+  };
+
+  const stampPane = () => {
+    const text = document.createElement("input");
+    text.type = "text";
+    text.value = state.toolDefaults.stamp.text;
+    text.addEventListener("input", () => {
+      state.toolDefaults.stamp.text = text.value;
+    });
+    const color = document.createElement("input");
+    color.type = "color";
+    color.value = state.toolDefaults.stamp.color;
+    color.addEventListener("input", () => {
+      state.toolDefaults.stamp.color = color.value;
+    });
+    return placeholderPane("Stamp presets are stored locally.", [
+      createLabeledField("Stamp text", text),
+      createLabeledField("Stamp color", color)
+    ]);
+  };
+
+  const markPane = () => {
+    const color = document.createElement("input");
+    color.type = "color";
+    color.value = state.toolDefaults.mark.color;
+    color.addEventListener("input", () => {
+      state.toolDefaults.mark.color = color.value;
+    });
+    return placeholderPane("Page order tools live here.", [
+      createLabeledField("Marker color", color),
+      reorderGroup
+    ]);
+  };
+
+  const signaturePane = () => {
+    const name = document.createElement("input");
+    name.type = "text";
+    name.value = state.toolDefaults.signature.name;
+    name.addEventListener("input", () => {
+      state.toolDefaults.signature.name = name.value;
+    });
+    return placeholderPane("Signature setup will be added later.", [
+      createLabeledField("Signer name", name)
+    ]);
+  };
+
+  const panes = new Map();
+  panes.set("text", createPane("text", "Text", textToolGroup));
+  panes.set("image", createPane("image", "Images", assetGroup));
+  panes.set("draw", createPane("draw", "Draw", drawPane()));
+  panes.set("highlight", createPane("highlight", "Highlight", highlightPane()));
+  panes.set("comment", createPane("comment", "Comment", commentPane()));
+  panes.set("stamp", createPane("stamp", "Stamp", stampPane()));
+  panes.set("mark", createPane("mark", "Mark", markPane()));
+  panes.set("signature", createPane("signature", "Signature", signaturePane()));
+
+  renderPanes = () => {
+    paneRoot.innerHTML = "";
+    const activePaneId =
+      state.activeTool !== "select" && state.paneOpen[state.activeTool]
+        ? state.activeTool
+        : null;
+    if (!activePaneId) {
+      return;
+    }
+    const pane = panes.get(activePaneId);
+    if (!pane) {
+      return;
+    }
+    const position = state.panePositions[activePaneId] ?? { left: 32, top: 140 };
+    pane.style.left = `${position.left}px`;
+    pane.style.top = `${position.top}px`;
+    paneRoot.append(pane);
+  };
+
+  workspace.append(viewerGroup, paneRoot);
+
+  topBar.append(brand, fileActions, toolBar, actions, settingsPanel);
+
+  setActiveTool("select");
+  renderPanes();
+
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      setActiveTool("select");
+      renderPanes();
+    }
+  });
+
+  container.append(topBar, trustBox, status, workspace);
   root.append(container);
 }

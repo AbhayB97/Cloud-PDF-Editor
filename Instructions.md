@@ -967,3 +967,389 @@ If highlights exist, optionally allow tint/opacity later; for now focus on:
 
 ## Final Reminder
 Keep changes minimal and incremental. Do not refactor the app structure. Implement only what is required above, with tests alongside.
+
+---------------------------------
+# Codex Task Block — Top Bar + Movable Side Panes + Document-First Layout (Authoritative)
+
+## Objective
+Refactor the UI to a **document-first layout** with:
+- A persistent **top bar** holding tools and actions
+- A dominant **central document workspace**
+- **Expandable, movable side panes** for advanced features (draw, text, highlight, comments, stamps, marks)
+
+This task is a **UI architecture change only**.  
+Do not modify PDF rendering, annotation export, or offline logic.
+
+---
+
+## Hard Constraints (Do Not Violate)
+- Do NOT change PDF export logic
+- Do NOT refactor annotation data models
+- Do NOT introduce backend calls
+- Do NOT add analytics or tracking
+- Do NOT re-introduce vertical form layouts
+- One active tool at a time
+- All panes must be optional and dismissible
+
+---
+
+## Layout Requirements
+
+### 1. Top Bar
+Create a fixed top bar containing:
+- Product name / logo (left)
+- Tool buttons (center)
+- Export PDF button (right)
+- Settings menu (theme, install info)
+
+Tool buttons must represent **modes**, not forms:
+- Select
+- Text
+- Draw
+- Highlight
+- Comment
+- Stamp
+- Mark
+- Image
+- Signature (placeholder)
+
+Only one tool can be active at a time.
+`Esc` resets to Select tool.
+
+---
+
+### 2. Main Document Workspace
+- Occupies the majority of the viewport
+- Renders the PDF canvas and annotation overlays
+- Does not resize when side panes open
+- Provides neutral background and page shadow
+
+---
+
+### 3. Movable Side Panes
+
+Each advanced tool opens its own pane:
+- Text Pane
+- Draw Pane
+- Highlight Pane
+- Comment Pane
+- Stamp Pane
+- Mark Pane
+
+Pane behavior:
+- Floating above the document workspace
+- Draggable by header
+- Expandable / collapsible
+- Closeable
+- Only one pane visible per active tool
+
+Pane contents must only modify **annotation state and defaults**.
+
+---
+
+## Pane Implementation Rules
+- Implement panes as absolutely positioned components
+- Store pane position in local UI state
+- Optional: persist position in localStorage
+- No PDF.js or pdf-lib calls inside panes
+
+---
+
+## UI Behavior Rules
+- Switching tools switches the active pane
+- Closing a pane does not change the active tool
+- Selecting an annotation updates pane controls
+- No pane is shown when Select tool is active
+
+---
+
+## Styling Rules
+- Use CSS grid/flex for layout
+- Use CSS variables for theme compatibility
+- Avoid borders-heavy UI; prefer spacing and contrast
+- Export button must be visually primary
+
+---
+
+## Files Expected to Change
+- app.js (layout, tool state, pane management)
+- styles.css (grid layout, pane styling, top bar)
+- index.html (structure hooks if needed)
+
+No changes allowed in:
+- pdfService.js
+- storage.js
+- sw.js
+
+---
+
+## Tests (Mandatory)
+- Tool switching updates active mode correctly
+- Only one pane visible at a time
+- Pane drag updates position state
+- Export still works with no UI regressions
+- App remains usable offline
+
+---
+
+## Completion Criteria
+- Document canvas is the visual focus
+- Tools live in the top bar
+- Advanced features live in movable side panes
+- No regression to existing features
+- UI feels comparable to professional desktop PDF tools
+
+---
+
+## Final Reminder
+This refactor is about **confidence, hierarchy, and longevity**.
+Do not add features beyond layout and pane structure in this task.
+
+--------------------------------------
+— Authorized Feature Expansion (Amendment)
+
+This section amends and extends the existing Instructions.md.
+All rules not explicitly modified here remain in force.
+
+Amendment: Rich Text Styling for Text Annotations (Authorized)
+Scope Expansion (Explicitly Allowed)
+
+Text annotations are no longer limited to plain, uniform styling.
+
+The editor MAY support rich text styling within a single text annotation, including:
+
+Bold
+
+Italic
+
+Underline
+
+Per-selection font size changes
+
+Per-selection color changes
+
+This applies only to overlay text annotations, not to existing PDF text.
+
+Hard Constraints (Still Enforced)
+
+Do NOT edit existing PDF text
+
+Do NOT attempt OCR
+
+Do NOT auto-detect form fields
+
+Do NOT modify original PDF bytes
+
+Do NOT introduce backend processing
+
+Do NOT autosave or silently persist
+
+Export must still flatten all content via pdf-lib
+
+Rich Text Behavior Rules (Authoritative)
+
+A text annotation may contain multiple styled segments.
+
+If the user selects:
+
+the entire text box → style applies to all text
+
+a word or character range → style applies only to that selection
+
+Styling changes must be reflected immediately in the overlay (WYSIWYG).
+
+Export must preserve visual fidelity, not semantic text structure.
+
+Required Data Model Extension
+
+Text annotations must support styled spans:
+
+TextAnnotation {
+  id: string
+  pageNumber: number
+  x: number
+  y: number
+  width: number
+  height: number
+  spans: {
+    text: string
+    bold?: boolean
+    italic?: boolean
+    underline?: boolean
+    fontSize?: number
+    color?: string
+  }[]
+  fontFamily: string
+}
+
+Export Rules (Clarified)
+
+On export:
+
+Iterate spans in order
+
+Draw text sequentially using drawText()
+
+Apply style per span
+
+Underlines must be rendered as vector lines (not font magic)
+
+Visual output must match overlay exactly
+
+Semantic text preservation is not required.
+
+Amendment: Drawing Tool Execution (Authorized)
+Scope Expansion (Explicitly Allowed)
+
+The Draw tool is now authorized to create annotations, not just configure them.
+
+The following drawing modes are explicitly allowed:
+
+Freehand (path)
+
+Line
+
+Arrow
+
+Rectangle
+
+Circle / Ellipse
+
+Polygon
+
+Cloud
+
+Connected lines
+
+Drawing Execution Rules
+
+Drawing occurs only on the overlay layer.
+
+Draw actions:
+
+Begin on mouse/touch down
+
+Update on move
+
+Commit on release
+
+Stroke color and stroke width must be configurable before drawing.
+
+No rasterization — all drawings must be vector-based.
+
+Required Data Model (Clarified)
+PathAnnotation {
+  id: string
+  pageNumber: number
+  points: { x: number; y: number }[]
+  strokeColor: string
+  strokeWidth: number
+  opacity?: number
+}
+
+Export Rules
+
+Paths must be exported as vector strokes using pdf-lib
+
+Stroke joins and caps should be preserved where possible
+
+Original PDF remains untouched
+
+Amendment: Highlight Tool Execution (Authorized)
+Scope Expansion (Explicitly Allowed)
+
+Highlighting is no longer configuration-only.
+
+The editor MUST support actual highlight placement.
+
+Highlight Behavior Rules
+
+Initial implementation uses manual rectangle highlights:
+
+Click-drag to define highlight area
+
+Highlight color and opacity configurable beforehand
+
+Highlights render beneath text annotations but above the PDF page
+
+Text-aware highlighting remains out of scope for now
+
+Required Data Model
+HighlightAnnotation {
+  id: string
+  pageNumber: number
+  x: number
+  y: number
+  width: number
+  height: number
+  color: string
+  opacity: number
+}
+
+Export Rules
+
+Highlights exported as semi-transparent rectangles
+
+No PDF comment objects
+
+No text extraction
+
+UI Authorization Clarification
+
+The following UI behaviors are now explicitly allowed:
+
+Selecting text ranges inside text annotations
+
+Contextual enabling/disabling of Bold / Italic / Underline buttons
+
+Drawing directly on the document when Draw tool is active
+
+Executing highlight placement when Highlight tool is active
+
+All tools remain single-mode only.
+
+Explicitly Still Forbidden (No Change)
+
+Editing existing PDF text
+
+OCR
+
+AI features
+
+Cloud sync
+
+Real PDF comments / annotations
+
+Background uploads
+
+Auto-updates
+
+Testing Addendum (Mandatory)
+
+New tests must be added for:
+
+Per-selection text styling
+
+Mixed-style text export fidelity
+
+Draw path creation and export
+
+Highlight placement and export
+
+No regressions to image/text/export/offline
+
+Failing tests block completion.
+
+Final Authority Statement
+
+With this amendment:
+
+Codex IS AUTHORIZED to implement:
+
+Rich text styling inside text annotations
+
+Actual draw tool execution
+
+Actual highlight placement
+
+Any future refusal to implement these features would be incorrect.

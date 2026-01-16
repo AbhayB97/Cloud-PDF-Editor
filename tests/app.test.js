@@ -13,7 +13,9 @@ vi.mock("../src/pdfService.js", () => {
     },
     reorderPdf: async (bytes) => bytes,
     applyImageAnnotations: async (bytes) => bytes,
-    applyTextAnnotations: async (bytes) => bytes
+    applyTextAnnotations: async (bytes) => bytes,
+    applyDrawAnnotations: async (bytes) => bytes,
+    applyHighlightAnnotations: async (bytes) => bytes
   };
 });
 
@@ -89,16 +91,15 @@ describe("app shell", () => {
   it("renders load and merge controls", () => {
     const root = setupDom();
     initApp(root);
-    expect(root.querySelector("[data-role=\"pdf-load\"]")).toBeTruthy();
+    expect(root.textContent).toContain("Load PDF");
     expect(root.textContent).toContain("Merge PDFs");
   });
 
-  it("renders export and image asset controls", () => {
+  it("renders export and settings controls", () => {
     const root = setupDom();
     initApp(root);
-    expect(root.textContent).toContain("Image Assets");
-    expect(root.textContent).toContain("Text Tool");
-    expect(root.textContent).toContain("Download PDF");
+    expect(root.textContent).toContain("Export PDF");
+    expect(root.textContent).toContain("Settings");
   });
 
   it("creates an annotation from drag-and-drop", async () => {
@@ -111,7 +112,11 @@ describe("app shell", () => {
     setInputFiles(loadInput, [
       new File(["%PDF-1.4"], "test.pdf", { type: "application/pdf" })
     ]);
-    loadButton.click();
+    loadInput.dispatchEvent(new Event("change", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const imageTool = root.querySelector("[data-role=\"tool-image\"]");
+    imageTool.click();
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const assetInput = root.querySelector("[data-role=\"image-assets\"]");
@@ -150,7 +155,11 @@ describe("app shell", () => {
     setInputFiles(loadInput, [
       new File(["%PDF-1.4"], "test.pdf", { type: "application/pdf" })
     ]);
-    loadButton.click();
+    loadInput.dispatchEvent(new Event("change", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const imageTool = root.querySelector("[data-role=\"tool-image\"]");
+    imageTool.click();
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const assetInput = root.querySelector("[data-role=\"image-assets\"]");
@@ -195,7 +204,11 @@ describe("app shell", () => {
     setInputFiles(loadInput, [
       new File(["%PDF-1.4"], "test.pdf", { type: "application/pdf" })
     ]);
-    loadButton.click();
+    loadInput.dispatchEvent(new Event("change", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const imageTool = root.querySelector("[data-role=\"tool-image\"]");
+    imageTool.click();
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const assetInput = root.querySelector("[data-role=\"image-assets\"]");
@@ -221,6 +234,10 @@ describe("app shell", () => {
     });
     overlay.dispatchEvent(dropEvent);
     expect(overlay.querySelectorAll(".annotation").length).toBe(1);
+
+    const markTool = root.querySelector("[data-role=\"tool-mark\"]");
+    markTool.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
     const downButton = Array.from(root.querySelectorAll("button")).find(
       (button) => button.textContent === "Down"
@@ -251,12 +268,11 @@ describe("app shell", () => {
     setInputFiles(loadInput, [
       new File(["%PDF-1.4"], "test.pdf", { type: "application/pdf" })
     ]);
-    loadButton.click();
+    loadInput.dispatchEvent(new Event("change", { bubbles: true }));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    const textToggle = root.querySelector("[data-role=\"text-tool-toggle\"]");
-    textToggle.click();
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    const textTool = root.querySelector("[data-role=\"tool-text\"]");
+    textTool.click();
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const overlay = root.querySelector("[data-role=\"page-overlay\"]");
@@ -292,11 +308,11 @@ describe("app shell", () => {
     setInputFiles(loadInput, [
       new File(["%PDF-1.4"], "test.pdf", { type: "application/pdf" })
     ]);
-    loadButton.click();
+    loadInput.dispatchEvent(new Event("change", { bubbles: true }));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
-    const textToggle = root.querySelector("[data-role=\"text-tool-toggle\"]");
-    textToggle.click();
+    const textTool = root.querySelector("[data-role=\"tool-text\"]");
+    textTool.click();
 
     const overlay = root.querySelector("[data-role=\"page-overlay\"]");
     overlay.getBoundingClientRect = () => ({
@@ -308,7 +324,7 @@ describe("app shell", () => {
       bottom: 800
     });
     if (overlay.dataset.mode !== "text") {
-      textToggle.click();
+      textTool.click();
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
 
@@ -362,7 +378,11 @@ describe("app shell", () => {
     setInputFiles(loadInput, [
       new File(["%PDF-1.4"], "test.pdf", { type: "application/pdf" })
     ]);
-    loadButton.click();
+    loadInput.dispatchEvent(new Event("change", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const textTool = root.querySelector("[data-role=\"tool-text\"]");
+    textTool.click();
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const fontSizeInput = root.querySelector("[data-role=\"text-font-size\"]");
@@ -371,10 +391,6 @@ describe("app shell", () => {
     const colorInput = root.querySelector("[data-role=\"text-color\"]");
     colorInput.value = "#2563eb";
     colorInput.dispatchEvent(new Event("input"));
-
-    const textToggle = root.querySelector("[data-role=\"text-tool-toggle\"]");
-    textToggle.click();
-    await new Promise((resolve) => setTimeout(resolve, 0));
 
     const overlay = root.querySelector("[data-role=\"page-overlay\"]");
     overlay.getBoundingClientRect = () => ({
@@ -386,7 +402,7 @@ describe("app shell", () => {
       bottom: 800
     });
     if (overlay.dataset.mode !== "text") {
-      textToggle.click();
+      textTool.click();
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
     const clickEvent = new MouseEvent("click", { bubbles: true, clientX: 120, clientY: 130 });
@@ -396,5 +412,170 @@ describe("app shell", () => {
     );
     expect(annotation.style.fontSize).toBe("20px");
     expect(["rgb(37, 99, 235)", "#2563eb"]).toContain(annotation.style.color);
+  });
+
+  it("applies per-selection text styling", async () => {
+    const root = setupDom();
+    initApp(root);
+    const loadInput = root.querySelector("[data-role=\"pdf-load\"]");
+    setInputFiles(loadInput, [
+      new File(["%PDF-1.4"], "test.pdf", { type: "application/pdf" })
+    ]);
+    loadInput.dispatchEvent(new Event("change", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const textTool = root.querySelector("[data-role=\"tool-text\"]");
+    textTool.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const overlay = root.querySelector("[data-role=\"page-overlay\"]");
+    overlay.getBoundingClientRect = () => ({
+      width: 600,
+      height: 800,
+      left: 0,
+      top: 0,
+      right: 600,
+      bottom: 800
+    });
+    const clickEvent = new MouseEvent("click", { bubbles: true, clientX: 120, clientY: 130 });
+    overlay.dispatchEvent(clickEvent);
+
+    const annotation = await waitFor(() =>
+      overlay.querySelector("[data-role=\"text-annotation\"]")
+    );
+    const content = annotation.querySelector(".text-content");
+    content.textContent = "Hello World";
+    content.dispatchEvent(new Event("input", { bubbles: true }));
+    content.dispatchEvent(new Event("focusin", { bubbles: true }));
+
+    const textNode = content.firstChild;
+    const range = document.createRange();
+    range.setStart(textNode, 0);
+    range.setEnd(textNode, 5);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+
+    const boldButton = root.querySelector("[data-role=\"text-bold\"]");
+    boldButton.click();
+    const boldSpan = annotation.querySelector(".text-content span");
+    expect(boldSpan.style.fontWeight).toBe("bold");
+
+    const tailNode = Array.from(content.childNodes).find(
+      (node) => node.nodeType === Node.TEXT_NODE && node.textContent.includes("World")
+    );
+    const sizeRange = document.createRange();
+    sizeRange.setStart(tailNode, 1);
+    sizeRange.setEnd(tailNode, tailNode.textContent.length);
+    selection.removeAllRanges();
+    selection.addRange(sizeRange);
+
+    const fontSizeInput = root.querySelector("[data-role=\"text-font-size\"]");
+    fontSizeInput.value = "22";
+    fontSizeInput.dispatchEvent(new Event("change"));
+
+    const sizedSpan = Array.from(annotation.querySelectorAll(".text-content span")).find(
+      (node) => node.style.fontSize === "22px"
+    );
+    expect(sizedSpan).toBeTruthy();
+  });
+
+  it("creates draw and highlight annotations", async () => {
+    const root = setupDom();
+    initApp(root);
+    const loadInput = root.querySelector("[data-role=\"pdf-load\"]");
+    setInputFiles(loadInput, [
+      new File(["%PDF-1.4"], "test.pdf", { type: "application/pdf" })
+    ]);
+    loadInput.dispatchEvent(new Event("change", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const overlay = root.querySelector("[data-role=\"page-overlay\"]");
+    overlay.getBoundingClientRect = () => ({
+      width: 600,
+      height: 800,
+      left: 0,
+      top: 0,
+      right: 600,
+      bottom: 800
+    });
+
+    const drawTool = root.querySelector("[data-role=\"tool-draw\"]");
+    drawTool.click();
+    const drawDown = new Event("pointerdown", { bubbles: true });
+    Object.defineProperty(drawDown, "clientX", { value: 120 });
+    Object.defineProperty(drawDown, "clientY", { value: 130 });
+    Object.defineProperty(drawDown, "button", { value: 0 });
+    overlay.dispatchEvent(drawDown);
+    const drawMove = new Event("pointermove");
+    Object.defineProperty(drawMove, "clientX", { value: 180 });
+    Object.defineProperty(drawMove, "clientY", { value: 200 });
+    window.dispatchEvent(drawMove);
+    window.dispatchEvent(new Event("pointerup"));
+    const drawLayer = root.querySelector("[data-role=\"draw-layer\"]");
+    expect(drawLayer.querySelectorAll("[data-role=\"draw-path\"]").length).toBe(1);
+
+    const highlightTool = root.querySelector("[data-role=\"tool-highlight\"]");
+    highlightTool.click();
+    const highlightDown = new Event("pointerdown", { bubbles: true });
+    Object.defineProperty(highlightDown, "clientX", { value: 150 });
+    Object.defineProperty(highlightDown, "clientY", { value: 160 });
+    Object.defineProperty(highlightDown, "button", { value: 0 });
+    overlay.dispatchEvent(highlightDown);
+    const highlightMove = new Event("pointermove");
+    Object.defineProperty(highlightMove, "clientX", { value: 220 });
+    Object.defineProperty(highlightMove, "clientY", { value: 210 });
+    window.dispatchEvent(highlightMove);
+    window.dispatchEvent(new Event("pointerup"));
+    const highlightLayer = root.querySelector("[data-role=\"highlight-layer\"]");
+    expect(highlightLayer.querySelectorAll("[data-role=\"highlight-rect\"]").length).toBe(1);
+  });
+
+  it("switches tools and shows only one pane", async () => {
+    const root = setupDom();
+    initApp(root);
+    const textTool = root.querySelector("[data-role=\"tool-text\"]");
+    const imageTool = root.querySelector("[data-role=\"tool-image\"]");
+
+    textTool.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(root.querySelector("[data-role=\"pane-text\"]")).toBeTruthy();
+    expect(root.querySelector("[data-role=\"pane-image\"]")).toBeFalsy();
+
+    imageTool.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(root.querySelector("[data-role=\"pane-image\"]")).toBeTruthy();
+    expect(root.querySelector("[data-role=\"pane-text\"]")).toBeFalsy();
+  });
+
+  it("updates pane position when dragged", async () => {
+    const root = setupDom();
+    initApp(root);
+    const textTool = root.querySelector("[data-role=\"tool-text\"]");
+    textTool.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const pane = root.querySelector("[data-role=\"pane-text\"]");
+    pane.getBoundingClientRect = () => ({
+      left: 40,
+      top: 120,
+      right: 300,
+      bottom: 400,
+      width: 260,
+      height: 200
+    });
+    const header = pane.querySelector(".pane-header");
+    const down = new Event("pointerdown", { bubbles: true });
+    Object.defineProperty(down, "clientX", { value: 100 });
+    Object.defineProperty(down, "clientY", { value: 150 });
+    Object.defineProperty(down, "button", { value: 0 });
+    header.dispatchEvent(down);
+
+    const move = new Event("pointermove");
+    Object.defineProperty(move, "clientX", { value: 160 });
+    Object.defineProperty(move, "clientY", { value: 200 });
+    window.dispatchEvent(move);
+    window.dispatchEvent(new Event("pointerup"));
+    expect(pane.style.left).toBeTruthy();
+    expect(pane.style.top).toBeTruthy();
   });
 });
