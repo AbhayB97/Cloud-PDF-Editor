@@ -69,13 +69,6 @@ body {
   border: 1px dashed #c2c8d6;
 }
 
-input[type="number"] {
-  padding: 10px;
-  border-radius: 8px;
-  border: 1px solid #c2c8d6;
-  max-width: 160px;
-}
-
 button {
   align-self: start;
   padding: 10px 16px;
@@ -107,11 +100,54 @@ button:not(.primary) {
   font-weight: 600;
 }
 
+.canvas-wrap {
+  position: relative;
+  width: 100%;
+}
+
 .pdf-canvas {
+  display: block;
   width: 100%;
   background: #ffffff;
   border: 1px solid #e3e7ee;
   border-radius: 12px;
+}
+
+.page-overlay {
+  position: absolute;
+  inset: 0;
+  border-radius: 12px;
+  pointer-events: auto;
+}
+
+.page-overlay.drag-over {
+  outline: 2px dashed #4c6fff;
+  outline-offset: -6px;
+}
+
+.annotation {
+  position: absolute;
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
+  border: 2px solid rgba(76, 111, 255, 0.7);
+  border-radius: 6px;
+  cursor: move;
+}
+
+.annotation:focus {
+  outline: 2px solid #4c6fff;
+}
+
+.resize-handle {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  right: -6px;
+  bottom: -6px;
+  background: #4c6fff;
+  border-radius: 3px;
+  cursor: se-resize;
 }
 
 .nav {
@@ -145,6 +181,44 @@ button:not(.primary) {
   font-weight: 600;
 }
 
+.workspace {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  gap: 18px;
+  align-items: start;
+}
+
+.asset-list {
+  display: grid;
+  gap: 10px;
+}
+
+.asset-item {
+  display: grid;
+  grid-template-columns: 48px 1fr;
+  gap: 12px;
+  align-items: center;
+  padding: 8px;
+  border-radius: 10px;
+  border: 1px solid #e3e7ee;
+  background: #f9fafc;
+  cursor: grab;
+}
+
+.asset-item img {
+  width: 48px;
+  height: 48px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid #e3e7ee;
+}
+
+.muted {
+  margin: 0;
+  color: #6a7082;
+  font-size: 14px;
+}
+
 .remember {
   display: flex;
   align-items: center;
@@ -155,6 +229,10 @@ button:not(.primary) {
 @media (max-width: 700px) {
   #app {
     padding: 32px 16px 48px;
+  }
+
+  .workspace {
+    grid-template-columns: 1fr;
   }
 
   .nav {

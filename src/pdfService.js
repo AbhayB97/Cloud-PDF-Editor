@@ -78,6 +78,17 @@ function detectImageType(bytes) {
   return null;
 }
 
+export function convertOverlayRectToPdfRect(overlayRect, pageSize, overlaySize) {
+  const scaleX = pageSize.width / overlaySize.width;
+  const scaleY = pageSize.height / overlaySize.height;
+  return {
+    x: overlayRect.x * scaleX,
+    y: pageSize.height - (overlayRect.y + overlayRect.height) * scaleY,
+    width: overlayRect.width * scaleX,
+    height: overlayRect.height * scaleY
+  };
+}
+
 export async function insertImage(bytes, imageBytes, options = {}) {
   const pdfDoc = await PDFDocument.load(bytes);
   const pageNumber = options.pageNumber ?? 1;
@@ -103,6 +114,64 @@ export async function insertImage(bytes, imageBytes, options = {}) {
     width: drawWidth,
     height: drawHeight
   });
+
+  return pdfDoc.save();
+}
+
+export async function applyImageAnnotations(bytes, assets, annotations) {
+  if (!annotations.length) {
+    return bytes;
+  }
+  const sourceBytes = bytes instanceof Uint8Array ? bytes.slice() : new Uint8Array(bytes);
+  const pdfDoc = await PDFDocument.load(sourceBytes);
+  const assetMap = new Map(assets.map((asset) => [asset.id, asset]));
+
+  for (const annotation of annotations) {
+    const asset = assetMap.get(annotation.assetId);
+    if (!asset) {
+      continue;
+    }
+    const imageData =
+      asset.imageData instanceof Uint8Array
+        ? asset.imageData
+        : new Uint8Array(await asset.imageData.arrayBuffer());
+    const pngOrJpg = detectImageType(imageData);
+    if (!pngOrJpg) {
+      throw new Error("Only PNG and JPEG images are supported.");
+    }
+    const embed = pngOrJpg === "png" ? pdfDoc.embedPng : pdfDoc.embedJpg;
+    const image = await embed.call(pdfDoc, imageData);
+    const pageIndex = Math.max(
+      0,
+      Math.min(annotation.pageNumber - 1, pdfDoc.getPageCount() - 1)
+    );
+    const page = pdfDoc.getPage(pageIndex);
+    const { width: pageWidth, height: pageHeight } = page.getSize();
+    if (!annotation.overlayWidth || !annotation.overlayHeight) {
+      throw new Error("Missing overlay size for image placement.");
+    }
+    const overlaySize = {
+      width: annotation.overlayWidth,
+      height: annotation.overlayHeight
+    };
+    const pdfRect = convertOverlayRectToPdfRect(
+      {
+        x: annotation.x,
+        y: annotation.y,
+        width: annotation.width,
+        height: annotation.height
+      },
+      { width: pageWidth, height: pageHeight },
+      overlaySize
+    );
+
+    page.drawImage(image, {
+      x: pdfRect.x,
+      y: pdfRect.y,
+      width: pdfRect.width,
+      height: pdfRect.height
+    });
+  }
 
   return pdfDoc.save();
 }

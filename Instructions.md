@@ -359,3 +359,204 @@ If Codex or any contributor deviates from this file, the implementation is consi
 Build slow.
 Build stable.
 Build something that still works years from now.
+
+
+-------------------------
+Drag & Drop Image Placement (Authoritative)
+Objective
+
+Upgrade image insertion UX from manual page/X/Y input to drag-and-drop placement on the PDF, while keeping the existing PDF export pipeline unchanged.
+
+This task must not modify how PDFs are exported or processed internally.
+It only changes how image placement is collected from the user.
+
+Hard Constraints (Do Not Violate)
+
+Do NOT change PDF merge logic
+
+Do NOT change export logic
+
+Do NOT modify original PDF bytes
+
+Do NOT add backend or network calls
+
+Do NOT require manual coordinate entry
+
+All placement must remain local-first
+
+Image insertion must still use pdf-lib on export
+
+Functional Requirements
+
+Image Upload → Asset Pane
+
+When an image (PNG/JPEG) is uploaded:
+
+Store it as an in-memory image asset
+
+Display it in a left/right side pane (“Image Assets”)
+
+Make the asset draggable
+
+Image is NOT added to the PDF yet
+
+PDF Page Overlay
+
+Each rendered PDF page must have:
+
+A positioned overlay layer above the canvas
+
+Overlay must accept drag-and-drop
+
+Overlay must map screen coordinates → page-relative coordinates
+
+Drag & Drop Placement
+
+User can drag an image from the asset pane
+
+Drop it anywhere on a page overlay
+
+On drop:
+
+Create an image annotation object
+
+Associate it with the correct page
+
+Render the image visibly on the overlay
+
+Image Adjustment
+
+Placed images must be:
+
+Movable (drag within the page)
+
+Resizable (basic corner handles acceptable)
+
+All adjustments update annotation state only
+
+Export Behavior (Unchanged)
+
+On export:
+
+Convert annotation coordinates to PDF coordinates
+
+Embed images using existing pdf-lib logic
+
+Generate a new PDF file
+
+Original PDF must remain untouched
+
+Data Model (Must Use or Equivalent)
+ImageAsset {
+  id: string
+  name: string
+  imageData: Uint8Array | Blob
+  naturalWidth: number
+  naturalHeight: number
+}
+
+ImageAnnotation {
+  id: string
+  assetId: string
+  pageNumber: number
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+Coordinate Rules (Critical)
+
+Overlay coordinates are top-left origin
+
+PDF coordinates are bottom-left origin
+
+Conversion must happen only at export time
+
+Y-axis must be inverted correctly:
+
+pdfY = pageHeight - overlayY - overlayHeight
+
+
+Centralize coordinate conversion logic in pdfService.js.
+
+File Responsibilities
+
+app.js
+
+Asset pane UI
+
+Drag source logic
+
+Overlay drop handling
+
+Annotation state management
+
+Overlay rendering of images
+
+pdfService.js
+
+Embed images into PDF using annotation data
+
+Coordinate conversion
+
+Export logic (existing logic reused)
+
+storage.js
+
+No required changes (optional persistence only)
+
+sw.js / main.js
+
+No changes allowed
+
+Tests (Mandatory)
+
+Add or update tests to cover:
+
+Drag-and-drop creates an image annotation
+
+Annotation is associated with the correct page
+
+Exported PDF contains the image
+
+Image position in exported PDF matches preview
+
+Works offline
+
+Original PDF bytes remain unchanged
+
+Failing tests block completion.
+
+Explicitly Out of Scope
+
+Text insertion
+
+Signature input
+
+OCR
+
+Editing existing PDF text
+
+Auto-detecting form fields
+
+Completion Criteria
+
+This task is complete only when:
+
+User can visually place images by dragging
+
+No manual coordinates are required
+
+Export output matches on-screen placement
+
+All tests pass
+
+No regressions to merge, export, or offline behavior
+
+Final Reminder
+
+This change only improves UX.
+The underlying PDF pipeline must remain stable and unchanged.
+
+Do not refactor unrelated code.

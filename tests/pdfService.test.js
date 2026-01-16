@@ -110,4 +110,76 @@ describe("pdfService", () => {
     const doc = await PDFDocument.load(updated);
     expect(doc.getPageCount()).toBe(1);
   });
+
+  it("converts overlay coordinates to PDF coordinates", async () => {
+    const { convertOverlayRectToPdfRect } = await import("../src/pdfService.js");
+    const rect = convertOverlayRectToPdfRect(
+      { x: 60, y: 80, width: 120, height: 160 },
+      { width: 600, height: 800 },
+      { width: 300, height: 400 }
+    );
+    expect(rect).toEqual({ x: 120, y: 320, width: 240, height: 320 });
+  });
+
+  it("applies annotations without mutating original bytes", async () => {
+    const { applyImageAnnotations } = await import("../src/pdfService.js");
+    const bytes = await createPdfWithPageSizes([[600, 800]]);
+    const original = new Uint8Array(bytes);
+    const assetId = "asset-1";
+    const assets = [
+      {
+        id: assetId,
+        name: "pixel.png",
+        imageData: Uint8Array.from(Buffer.from(PNG_BASE64, "base64")),
+        naturalWidth: 1,
+        naturalHeight: 1
+      }
+    ];
+    const annotations = [
+      {
+        id: "annotation-1",
+        assetId,
+        pageNumber: 1,
+        x: 10,
+        y: 20,
+        width: 50,
+        height: 60,
+        overlayWidth: 300,
+        overlayHeight: 400
+      }
+    ];
+    const updated = await applyImageAnnotations(bytes, assets, annotations);
+    expect(Array.from(new Uint8Array(bytes))).toEqual(Array.from(original));
+    expect(updated.byteLength).toBeGreaterThan(bytes.byteLength);
+  });
+
+  it("applies JPEG annotations", async () => {
+    const { applyImageAnnotations } = await import("../src/pdfService.js");
+    const bytes = await createPdfWithPageSizes([[600, 800]]);
+    const assetId = "asset-2";
+    const assets = [
+      {
+        id: assetId,
+        name: "pixel.jpg",
+        imageData: new Uint8Array(readFileSync(resolve("tests/fixtures/1x1.jpg"))),
+        naturalWidth: 1,
+        naturalHeight: 1
+      }
+    ];
+    const annotations = [
+      {
+        id: "annotation-2",
+        assetId,
+        pageNumber: 1,
+        x: 40,
+        y: 40,
+        width: 30,
+        height: 30,
+        overlayWidth: 300,
+        overlayHeight: 400
+      }
+    ];
+    const updated = await applyImageAnnotations(bytes, assets, annotations);
+    expect(updated.byteLength).toBeGreaterThan(bytes.byteLength);
+  });
 });
