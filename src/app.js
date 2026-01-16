@@ -22,7 +22,13 @@ const state = {
   imageAnnotations: [],
   textAnnotations: [],
   activeTool: "select",
-  selectedTextId: null
+  selectedTextId: null,
+  textDefaults: {
+    fontSize: 12,
+    fontFamily: "Helvetica",
+    color: "#111111"
+  },
+  installPromptEvent: null
 };
 
 function createButton(label, onClick, className) {
@@ -58,6 +64,26 @@ function getOverlayBounds(overlay) {
     width: rect.width || overlay.offsetWidth,
     height: rect.height || overlay.offsetHeight
   };
+}
+
+function getPreferredTheme() {
+  if (typeof window === "undefined") {
+    return "light";
+  }
+  const stored = window.localStorage?.getItem("cloud-pdf-theme");
+  if (stored) {
+    return stored;
+  }
+  const prefersDark = window.matchMedia?.("(prefers-color-scheme: dark)")?.matches;
+  return prefersDark ? "dark" : "light";
+}
+
+function applyTheme(theme) {
+  if (typeof document === "undefined") {
+    return;
+  }
+  document.documentElement.dataset.theme = theme;
+  window.localStorage?.setItem("cloud-pdf-theme", theme);
 }
 
 function getImageDimensions(objectUrl) {
@@ -453,6 +479,11 @@ async function loadPdfBytes(
   state.imageAssets = [];
   state.textAnnotations = [];
   state.selectedTextId = null;
+  state.textDefaults = {
+    fontSize: 12,
+    fontFamily: "Helvetica",
+    color: "#111111"
+  };
   renderPageList(pageList, applyButton);
   updatePageLabel(pageLabel);
   await refreshViewer(canvas, overlay, pageLabel, statusEl);
@@ -463,6 +494,7 @@ export function initApp(root) {
   if (!root) {
     throw new Error("App root element not found");
   }
+  applyTheme(getPreferredTheme());
 
   const container = document.createElement("div");
   container.className = "app-shell";
@@ -474,6 +506,19 @@ export function initApp(root) {
   subtitle.className = "app-subtitle";
   subtitle.textContent = "Local-first PDF editing. Files never leave your device.";
 
+  const trustBox = document.createElement("div");
+  trustBox.className = "trust-box";
+  const trustLines = [
+    "All PDF viewing and editing happens on your device.",
+    "Files are never uploaded.",
+    "Nothing is saved unless you export or explicitly enable session restore."
+  ];
+  trustLines.forEach((line) => {
+    const row = document.createElement("p");
+    row.textContent = line;
+    trustBox.append(row);
+  });
+
   const status = document.createElement("p");
   status.className = "status";
   status.textContent = "Load a PDF to begin.";
@@ -483,8 +528,66 @@ export function initApp(root) {
   const rememberToggle = document.createElement("input");
   rememberToggle.type = "checkbox";
   const rememberText = document.createElement("span");
-  rememberText.textContent = "Remember last session locally";
+  rememberText.textContent = "Remember last session locally (optional)";
   rememberWrap.append(rememberToggle, rememberText);
+
+  const themeGroup = document.createElement("section");
+  themeGroup.className = "panel";
+  const themeTitle = document.createElement("p");
+  themeTitle.className = "section-title";
+  themeTitle.textContent = "Theme";
+  const themeSelect = document.createElement("select");
+  themeSelect.dataset.role = "theme-select";
+  [
+    { label: "Light", value: "light" },
+    { label: "Dark", value: "dark" },
+    { label: "High Contrast", value: "contrast" }
+  ].forEach((theme) => {
+    const option = document.createElement("option");
+    option.value = theme.value;
+    option.textContent = theme.label;
+    themeSelect.append(option);
+  });
+  themeSelect.value = getPreferredTheme();
+  themeSelect.addEventListener("change", () => {
+    applyTheme(themeSelect.value);
+  });
+  themeGroup.append(themeTitle, themeSelect);
+
+  const installGroup = document.createElement("section");
+  installGroup.className = "panel";
+  const installTitle = document.createElement("p");
+  installTitle.className = "section-title";
+  installTitle.textContent = "Install App";
+  const installButton = createButton("Install App", async () => {
+    if (!state.installPromptEvent) {
+      installHint.hidden = false;
+      return;
+    }
+    const promptEvent = state.installPromptEvent;
+    state.installPromptEvent = null;
+    installButton.disabled = true;
+    await promptEvent.prompt();
+  }, "primary");
+  installButton.disabled = true;
+  installButton.hidden = true;
+  installButton.dataset.role = "install-button";
+  const installHelp = createButton("Install Instructions", () => {
+    installHint.hidden = false;
+  });
+  installHelp.className = "secondary";
+  const installHint = document.createElement("p");
+  installHint.className = "muted";
+  installHint.textContent = "Use browser menu → Install app";
+  installHint.hidden = true;
+  installGroup.append(installTitle, installButton, installHelp, installHint);
+
+  window.addEventListener("pwa-install-available", (event) => {
+    state.installPromptEvent = event.detail;
+    installButton.disabled = false;
+    installButton.hidden = false;
+    installHint.hidden = true;
+  });
 
   const restoreButton = createButton("Restore Last Session", async () => {
     try {
@@ -639,9 +742,9 @@ export function initApp(root) {
       width: 160,
       height: 32,
       text: "",
-      fontSize: 16,
-      fontFamily: "Helvetica",
-      color: "#111111",
+      fontSize: state.textDefaults.fontSize,
+      fontFamily: state.textDefaults.fontFamily,
+      color: state.textDefaults.color,
       overlayWidth,
       overlayHeight
     };
@@ -799,7 +902,7 @@ export function initApp(root) {
   fontSizeInput.type = "number";
   fontSizeInput.min = "8";
   fontSizeInput.max = "72";
-  fontSizeInput.value = "16";
+  fontSizeInput.value = String(state.textDefaults.fontSize);
   fontSizeInput.dataset.role = "text-font-size";
 
   const fontFamilySelect = document.createElement("select");
@@ -813,7 +916,7 @@ export function initApp(root) {
 
   const colorInput = document.createElement("input");
   colorInput.type = "color";
-  colorInput.value = "#111111";
+  colorInput.value = state.textDefaults.color;
   colorInput.dataset.role = "text-color";
 
   const removeTextButton = createButton("Remove Text", () => {
@@ -829,13 +932,14 @@ export function initApp(root) {
     setStatus(status, "Text removed.");
   });
 
-  const updateSelectedText = (update) => {
+  const updateSelectedText = (update, updateDefault) => {
     if (!state.selectedTextId) {
-      setStatus(status, "Select a text annotation first.", true);
+      updateDefault();
       return;
     }
     const annotation = state.textAnnotations.find((item) => item.id === state.selectedTextId);
     if (!annotation) {
+      updateDefault();
       return;
     }
     update(annotation);
@@ -844,21 +948,53 @@ export function initApp(root) {
 
   fontSizeInput.addEventListener("change", () => {
     const value = Number.parseInt(fontSizeInput.value, 10);
-    updateSelectedText((annotation) => {
-      annotation.fontSize = Number.isFinite(value) ? value : annotation.fontSize;
-    });
+    updateSelectedText(
+      (annotation) => {
+        annotation.fontSize = Number.isFinite(value) ? value : annotation.fontSize;
+      },
+      () => {
+        if (Number.isFinite(value)) {
+          state.textDefaults.fontSize = value;
+        }
+      }
+    );
   });
 
   fontFamilySelect.addEventListener("change", () => {
-    updateSelectedText((annotation) => {
-      annotation.fontFamily = fontFamilySelect.value;
-    });
+    updateSelectedText(
+      (annotation) => {
+        annotation.fontFamily = fontFamilySelect.value;
+      },
+      () => {
+        state.textDefaults.fontFamily = fontFamilySelect.value;
+      }
+    );
   });
 
   colorInput.addEventListener("input", () => {
-    updateSelectedText((annotation) => {
-      annotation.color = colorInput.value;
+    updateSelectedText(
+      (annotation) => {
+        annotation.color = colorInput.value;
+      },
+      () => {
+        state.textDefaults.color = colorInput.value;
+      }
+    );
+  });
+
+  const palette = document.createElement("div");
+  palette.className = "color-palette";
+  ["#111111", "#1f2937", "#2563eb", "#0f766e", "#b91c1c"].forEach((color) => {
+    const swatch = document.createElement("button");
+    swatch.type = "button";
+    swatch.className = "color-swatch";
+    swatch.style.background = color;
+    swatch.dataset.color = color;
+    swatch.addEventListener("click", () => {
+      colorInput.value = color;
+      colorInput.dispatchEvent(new Event("input"));
     });
+    palette.append(swatch);
   });
 
   overlay.addEventListener("focusin", (event) => {
@@ -882,6 +1018,7 @@ export function initApp(root) {
     fontSizeInput,
     fontFamilySelect,
     colorInput,
+    palette,
     removeTextButton
   );
 
@@ -990,9 +1127,12 @@ export function initApp(root) {
   container.append(
     title,
     subtitle,
+    trustBox,
     status,
     rememberWrap,
     restoreButton,
+    themeGroup,
+    installGroup,
     loadGroup,
     mergeGroup,
     workspace,

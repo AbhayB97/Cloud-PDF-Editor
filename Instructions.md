@@ -791,3 +791,179 @@ legal safety
 long-term stability
 
 Do not refactor unrelated code.
+
+----------------------
+# Codex Task Block — UX Trust Messaging + PWA Install + Themes + Annotation Styling (Authoritative)
+
+## Objective
+Implement the following in the existing local-first Cloud PDF Editor without changing core PDF pipelines:
+1) Emphasize **local ownership messaging** in UI copy (high priority, low effort)
+2) Support **installable PWA** app experience (high priority, low effort)
+3) Add **UI themes**: light / dark / high-contrast (medium priority)
+4) Add **annotation styling controls** (medium priority): font size + color for text annotations; optional tint/opacity for highlights if present
+
+This work must preserve local-first rules, offline behavior, and explicit export.
+
+---
+
+## Hard Constraints (Do Not Violate)
+- No backend, no network calls for PDF processing
+- No analytics/telemetry
+- No forced updates
+- No silent autosave
+- Do not refactor unrelated code
+- Do not change merge/export logic except to apply styling metadata already captured in annotation state
+- Must keep offline support working (service worker remains cache-first)
+- All user data stays local unless explicitly exported
+
+---
+
+## Deliverables Overview
+A) UI copy changes: clear, visible local-first trust messaging
+B) PWA installability: manifest + install prompt UX + icons + verified offline launch
+C) Themes: CSS variables + toggle + persistence (local, user-controlled)
+D) Annotation styling: UI controls + state model + export reflects styles + tests
+
+---
+
+## A) Local Ownership Messaging (UI Copy)
+### Requirements
+Add a small “Trust / Privacy” message area in the UI (header or settings panel) that always states:
+- “All PDF viewing and editing happens on your device.”
+- “Files are never uploaded.”
+- “Nothing is saved unless you export or explicitly enable session restore.”
+
+If there is an existing “remember last session” feature:
+- Ensure wording clarifies it is local-only and optional.
+- If restore prompt exists, the copy must appear near it.
+
+### Acceptance Criteria
+- Message is visible without scrolling on desktop
+- Message is concise (2–4 lines)
+- No misleading “cloud processing” claims
+
+---
+
+## B) Installable PWA App Experience
+### Requirements
+1) Add/verify `manifest.webmanifest` with:
+   - name, short_name
+   - start_url (root)
+   - display: standalone
+   - background_color, theme_color
+   - icons (at least 192x192 and 512x512 PNG)
+2) Ensure service worker registration remains correct and app launches offline after first load.
+3) Add a non-intrusive “Install App” UI affordance:
+   - Show only when `beforeinstallprompt` is fired
+   - Button triggers `prompt()`
+   - Track user dismissal only in-memory (no analytics)
+4) Add minimal install instructions fallback if browser doesn’t support install prompt:
+   - A small tooltip/modal: “Use browser menu → Install app”
+
+### Files
+- `manifest.webmanifest` (new)
+- `icons/` assets (new)
+- `main.js` or equivalent entry point: handle `beforeinstallprompt`
+- existing `sw.js` should remain cache-first; update cache list if needed for new files
+
+### Acceptance Criteria
+- Lighthouse PWA checks pass for installability basics (as much as applicable)
+- App can be installed and opens in standalone window
+- App loads offline after first load
+
+### Tests
+- Presence of manifest and required fields (unit test)
+- Service worker still registered (existing sw test updated if needed)
+
+---
+
+## C) UI Themes (Light / Dark / High Contrast)
+### Implementation Approach (Required)
+Use CSS variables on `:root` (or `html[data-theme="..."]`) and a minimal theme switcher.
+Themes must affect:
+- app background
+- text color
+- panels/buttons
+- overlay outlines/handles (so annotations remain visible)
+Do not theme the PDF itself (rendered pages remain as-is). Theme the surrounding UI.
+
+### Requirements
+1) Add a Theme toggle in UI (Settings panel recommended):
+   - Light
+   - Dark
+   - High Contrast
+2) Persist chosen theme locally:
+   - localStorage is fine
+   - Must be user-controlled (no silent changes)
+3) Default behavior:
+   - Respect OS preference for light/dark ONLY on first run
+   - After user chooses, always use saved theme
+
+### Acceptance Criteria
+- Switching themes updates UI instantly
+- High-contrast improves readability (strong foreground/background contrast)
+- No layout breakage
+
+### Tests
+- Theme value persists round-trip (unit test)
+- Default respects OS preference when no saved value (mock matchMedia)
+
+---
+
+## D) Annotation Styling Controls (Font Size + Color)
+### Scope
+This applies primarily to the new text overlay annotations (form-filling).
+If highlights exist, optionally allow tint/opacity later; for now focus on:
+- Text font size
+- Text color
+
+### Requirements
+1) Add styling controls in UI:
+   - Font size: numeric input or slider (min 8, max 72, default 12 or current)
+   - Color: small palette + custom input (hex or color picker)
+2) Styling behavior:
+   - When a text annotation is selected, controls show its current style and update it live
+   - When no annotation selected, controls set defaults for the next text annotation created
+3) Update data model for text annotations (if not already):
+   - `fontSize` (number)
+   - `color` (string like "#000000")
+   - `fontFamily` should remain (must include monospaced option)
+4) Export must reflect styling:
+   - `pdfService.js` must draw text using correct size/color
+   - Embed font deterministically (use standard fonts if available; fallback to embedded font)
+5) Visual overlay must reflect styling:
+   - Overlay text matches color and size so WYSIWYG aligns with export
+
+### Acceptance Criteria
+- User can select text annotation and change size/color
+- Exported PDF text matches on-screen appearance
+- No regression to image annotations
+
+### Tests
+- Changing annotation style updates state
+- Export applies font size + color correctly
+- Default styling applies to newly created annotations
+
+---
+
+## Non-Goals / Explicitly Out of Scope
+- No OCR
+- No editing existing PDF text
+- No analytics
+- No cloud sync
+- No collaborative features
+- No font upload system (use limited safe fonts for now)
+
+---
+
+## Completion Checklist
+- [ ] UI displays local-first trust message
+- [ ] PWA manifest + icons added, install prompt works where supported
+- [ ] App installs and launches offline after first load
+- [ ] Theme switcher works (light/dark/high-contrast) with local persistence
+- [ ] Text annotation styling (font size/color) works + exports correctly
+- [ ] All tests pass and new tests added for manifest/theme/styling
+- [ ] No changes to unrelated modules; merge/export/offline behavior remains stable
+
+## Final Reminder
+Keep changes minimal and incremental. Do not refactor the app structure. Implement only what is required above, with tests alongside.

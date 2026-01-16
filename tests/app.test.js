@@ -351,4 +351,50 @@ describe("app shell", () => {
     window.dispatchEvent(new Event("pointerup"));
     expect(annotation.style.width).not.toBe(startWidth);
   });
+
+  it("applies default text styling to new annotations", async () => {
+    const root = setupDom();
+    initApp(root);
+    const loadInput = root.querySelector("[data-role=\"pdf-load\"]");
+    const loadButton = Array.from(root.querySelectorAll("button")).find(
+      (button) => button.textContent === "Load PDF"
+    );
+    setInputFiles(loadInput, [
+      new File(["%PDF-1.4"], "test.pdf", { type: "application/pdf" })
+    ]);
+    loadButton.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const fontSizeInput = root.querySelector("[data-role=\"text-font-size\"]");
+    fontSizeInput.value = "20";
+    fontSizeInput.dispatchEvent(new Event("change"));
+    const colorInput = root.querySelector("[data-role=\"text-color\"]");
+    colorInput.value = "#2563eb";
+    colorInput.dispatchEvent(new Event("input"));
+
+    const textToggle = root.querySelector("[data-role=\"text-tool-toggle\"]");
+    textToggle.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const overlay = root.querySelector("[data-role=\"page-overlay\"]");
+    overlay.getBoundingClientRect = () => ({
+      width: 600,
+      height: 800,
+      left: 0,
+      top: 0,
+      right: 600,
+      bottom: 800
+    });
+    if (overlay.dataset.mode !== "text") {
+      textToggle.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    const clickEvent = new MouseEvent("click", { bubbles: true, clientX: 120, clientY: 130 });
+    overlay.dispatchEvent(clickEvent);
+    const annotation = await waitFor(() =>
+      overlay.querySelector("[data-role=\"text-annotation\"]")
+    );
+    expect(annotation.style.fontSize).toBe("20px");
+    expect(["rgb(37, 99, 235)", "#2563eb"]).toContain(annotation.style.color);
+  });
 });

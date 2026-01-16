@@ -10,3 +10,9 @@ if ("serviceWorker" in navigator) {
     });
   });
 }
+
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  const installEvent = new CustomEvent("pwa-install-available", { detail: event });
+  window.dispatchEvent(installEvent);
+});
