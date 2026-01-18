@@ -85,12 +85,42 @@ describe("pdfService", () => {
     ]);
   });
 
+  it("splits PDFs by range", async () => {
+    const { splitPdf } = await import("../src/pdfService.js");
+    const bytes = await createPdfWithPageSizes([
+      [200, 300],
+      [300, 400],
+      [400, 500]
+    ]);
+    const outputs = await splitPdf(bytes, [
+      [1, 2],
+      [3]
+    ]);
+    expect(outputs.length).toBe(2);
+    const firstDoc = await PDFDocument.load(outputs[0]);
+    const secondDoc = await PDFDocument.load(outputs[1]);
+    expect(firstDoc.getPageCount()).toBe(2);
+    expect(secondDoc.getPageCount()).toBe(1);
+  });
+
   it("handles larger PDFs without throwing", async () => {
     const { reorderPdf } = await import("../src/pdfService.js");
     const sizes = Array.from({ length: 30 }, () => [612, 792]);
     const bytes = await createPdfWithPageSizes(sizes);
     const pageOrder = sizes.map((_, index) => index + 1);
     await expect(reorderPdf(bytes, pageOrder)).resolves.toBeTruthy();
+  });
+
+  it("applies page properties", async () => {
+    const { applyPageProperties } = await import("../src/pdfService.js");
+    const bytes = await createPdfWithPageSizes([
+      [300, 400],
+      [500, 600]
+    ]);
+    const updated = await applyPageProperties(bytes, [2, 1], { 2: 90 });
+    const doc = await PDFDocument.load(updated);
+    expect(doc.getPageCount()).toBe(2);
+    expect(doc.getPage(0).getRotation().angle).toBe(90);
   });
 
   it("inserts a PNG image", async () => {
@@ -297,6 +327,24 @@ describe("pdfService", () => {
       }
     ];
     const updated = await applyHighlightAnnotations(bytes, annotations);
+    expect(updated.byteLength).toBeGreaterThan(bytes.byteLength);
+  });
+
+  it("applies shape annotations", async () => {
+    const { applyShapeAnnotations } = await import("../src/pdfService.js");
+    const bytes = await createPdfWithPageSizes([[600, 800]]);
+    const annotations = [
+      {
+        id: "shape-1",
+        pageNumber: 1,
+        shapeType: "rect",
+        geometry: { x: 40, y: 50, width: 100, height: 80 },
+        style: { strokeColor: "#2563eb", strokeWidth: 3, fillColor: "#ffffff", opacity: 1 },
+        overlayWidth: 300,
+        overlayHeight: 400
+      }
+    ];
+    const updated = await applyShapeAnnotations(bytes, annotations);
     expect(updated.byteLength).toBeGreaterThan(bytes.byteLength);
   });
 

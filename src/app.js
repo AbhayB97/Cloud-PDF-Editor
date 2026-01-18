@@ -2,6 +2,8 @@ import {
   applyDrawAnnotations,
   applyHighlightAnnotations,
   applyImageAnnotations,
+  applyPageProperties,
+  applyShapeAnnotations,
   applySignatureAnnotations,
   applyTextAnnotations,
   isPdfBytes,
@@ -10,7 +12,8 @@ import {
   mergePdfs,
   readFileAsArrayBuffer,
   renderPageToCanvas,
-  reorderPdf
+  reorderPdf,
+  splitPdf
 } from "./pdfService.js";
 import {
   clearSessionHistory,
@@ -50,14 +53,28 @@ const state = {
   paneCollapsed: {},
   drawAnnotations: [],
   highlightAnnotations: [],
+  shapeAnnotations: [],
+  shapeDraft: null,
   selectedTextElement: null,
   toolDefaults: {
     draw: { color: "#2563eb", size: 4 },
     highlight: { color: "#f59e0b", opacity: 0.35 },
     comment: { color: "#111111", text: "Comment" },
     stamp: { text: "APPROVED", color: "#111111" },
-    mark: { color: "#b91c1c" },
+    shapes: {
+      shapeType: "rect",
+      strokeColor: "#2563eb",
+      strokeWidth: 3,
+      fillColor: "",
+      opacity: 1
+    },
     signature: { name: "" }
+  },
+  pageProperties: {
+    rotations: {},
+    hidden: new Set(),
+    deleted: new Set(),
+    duplicates: {}
   },
   signatureProfile: null,
   signatureAnnotations: [],
@@ -77,14 +94,17 @@ const TOOL_DEFS = [
   { id: "text", label: "Text" },
   { id: "draw", label: "Draw" },
   { id: "highlight", label: "Highlight" },
+  { id: "shapes", label: "Shapes" },
   { id: "comment", label: "Comment" },
   { id: "stamp", label: "Stamp" },
-  { id: "mark", label: "Mark" },
+  { id: "page-properties", label: "Page Properties" },
   { id: "image", label: "Image" },
-  { id: "signature", label: "Signature" }
+  { id: "signature", label: "Signature" },
+  { id: "split", label: "Split" }
 ];
 
 let stampDeleteButton = null;
+let pagePropertiesUi = null;
 
 function createButton(label, onClick, className) {
   const button = document.createElement("button");
@@ -110,6 +130,18 @@ function syncStampDeleteButton() {
 function setStatus(statusEl, message, isError = false) {
   statusEl.textContent = message;
   statusEl.dataset.error = isError ? "true" : "false";
+}
+
+function downloadPdfBytes(bytes, filename) {
+  const blob = new Blob([bytes], { type: "application/pdf" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 function createId(prefix) {
@@ -498,6 +530,9 @@ function serializeSessionAnnotations() {
   state.highlightAnnotations.forEach((annotation) =>
     annotations.push({ type: "highlight", ...annotation })
   );
+  state.shapeAnnotations.forEach((annotation) =>
+    annotations.push({ type: "shape", ...annotation })
+  );
   state.signatureAnnotations.forEach((annotation) =>
     annotations.push({ type: "signature", ...annotation })
   );
@@ -516,6 +551,7 @@ function applySessionAnnotations(annotations) {
   const textAnnotations = [];
   const drawAnnotations = [];
   const highlightAnnotations = [];
+  const shapeAnnotations = [];
   const signatureAnnotations = [];
   const commentAnnotations = [];
   const stampAnnotations = [];
@@ -566,6 +602,11 @@ function applySessionAnnotations(annotations) {
       highlightAnnotations.push(rest);
       return;
     }
+    if (annotation.type === "shape") {
+      const { type, ...rest } = annotation;
+      shapeAnnotations.push(rest);
+      return;
+    }
     if (annotation.type === "signature") {
       const { type, ...rest } = annotation;
       signatureAnnotations.push(rest);
@@ -588,6 +629,7 @@ function applySessionAnnotations(annotations) {
   state.textAnnotations = textAnnotations;
   state.drawAnnotations = drawAnnotations;
   state.highlightAnnotations = highlightAnnotations;
+  state.shapeAnnotations = shapeAnnotations;
   state.signatureAnnotations = signatureAnnotations;
   state.commentAnnotations = commentAnnotations;
   state.stampAnnotations = stampAnnotations;
@@ -648,7 +690,171 @@ function updatePageLabel(pageLabel) {
     pageLabel.textContent = "No PDF loaded";
     return;
   }
-  pageLabel.textContent = `Page ${state.currentPage} of ${state.pageCount}`;
+  const visiblePages = getVisiblePages();
+  const totalVisible = visiblePages.length;
+  pageLabel.textContent =
+    totalVisible > 0
+      ? `Page ${state.currentPage} of ${state.pageCount} (visible: ${totalVisible})`
+      : `Page ${state.currentPage} of ${state.pageCount}`;
+}
+
+function isPageHidden(pageNumber) {
+  return state.pageProperties.hidden.has(pageNumber);
+}
+
+function isPageDeleted(pageNumber) {
+  return state.pageProperties.deleted.has(pageNumber);
+}
+
+function getVisiblePages() {
+  const pages = [];
+  for (let page = 1; page <= state.pageCount; page += 1) {
+    if (isPageHidden(page) || isPageDeleted(page)) {
+      continue;
+    }
+    pages.push(page);
+  }
+  return pages;
+}
+
+function buildExportPageOrder() {
+  const order = [];
+  for (let page = 1; page <= state.pageCount; page += 1) {
+    if (isPageHidden(page) || isPageDeleted(page)) {
+      continue;
+    }
+    order.push(page);
+    const duplicateCount = state.pageProperties.duplicates[page] ?? 0;
+    if (duplicateCount > 0) {
+      for (let i = 0; i < duplicateCount; i += 1) {
+        order.push(page);
+      }
+    }
+  }
+  return order;
+}
+
+function remapAnnotationsForExport(annotations, exportPageOrder) {
+  if (!annotations.length) {
+    return [];
+  }
+  const indexMap = new Map();
+  exportPageOrder.forEach((pageNumber, index) => {
+    if (!indexMap.has(pageNumber)) {
+      indexMap.set(pageNumber, []);
+    }
+    indexMap.get(pageNumber).push(index + 1);
+  });
+  const mapped = [];
+  annotations.forEach((annotation) => {
+    const targets = indexMap.get(annotation.pageNumber);
+    if (!targets?.length) {
+      return;
+    }
+    targets.forEach((targetPage) => {
+      mapped.push({ ...annotation, pageNumber: targetPage });
+    });
+  });
+  return mapped;
+}
+
+function parsePageGroups(input, mode, pageCount) {
+  const parts = input
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (!parts.length) {
+    return { groups: [], error: "Enter at least one page or range." };
+  }
+  const toNumber = (value) => {
+    const parsed = Number.parseInt(value, 10);
+    if (!Number.isFinite(parsed) || parsed < 1 || parsed > pageCount) {
+      return null;
+    }
+    return parsed;
+  };
+  if (mode === "range") {
+    const groups = [];
+    for (const part of parts) {
+      if (!part.includes("-")) {
+        const page = toNumber(part);
+        if (!page) {
+          return { groups: [], error: `Invalid page "${part}".` };
+        }
+        groups.push([page]);
+        continue;
+      }
+      const [startRaw, endRaw] = part.split("-").map((item) => item.trim());
+      const start = toNumber(startRaw);
+      const end = toNumber(endRaw);
+      if (!start || !end || start > end) {
+        return { groups: [], error: `Invalid range "${part}".` };
+      }
+      const range = [];
+      for (let page = start; page <= end; page += 1) {
+        range.push(page);
+      }
+      groups.push(range);
+    }
+    return { groups, error: null };
+  }
+
+  const pages = [];
+  const seen = new Set();
+  for (const part of parts) {
+    if (part.includes("-")) {
+      const [startRaw, endRaw] = part.split("-").map((item) => item.trim());
+      const start = toNumber(startRaw);
+      const end = toNumber(endRaw);
+      if (!start || !end || start > end) {
+        return { groups: [], error: `Invalid range "${part}".` };
+      }
+      for (let page = start; page <= end; page += 1) {
+        if (!seen.has(page)) {
+          seen.add(page);
+          pages.push(page);
+        }
+      }
+    } else {
+      const page = toNumber(part);
+      if (!page) {
+        return { groups: [], error: `Invalid page "${part}".` };
+      }
+      if (!seen.has(page)) {
+        seen.add(page);
+        pages.push(page);
+      }
+    }
+  }
+  return { groups: [pages], error: null };
+}
+
+function resolveVisiblePage(targetPage) {
+  if (!state.pageCount) {
+    return targetPage;
+  }
+  if (!isPageHidden(targetPage) && !isPageDeleted(targetPage)) {
+    return targetPage;
+  }
+  const visible = getVisiblePages();
+  if (!visible.length) {
+    return targetPage;
+  }
+  const next = visible.find((page) => page >= targetPage);
+  return next ?? visible[visible.length - 1];
+}
+
+function getNeighborVisiblePage(current, direction) {
+  const visible = getVisiblePages();
+  if (!visible.length) {
+    return current;
+  }
+  const index = visible.indexOf(current);
+  if (index === -1) {
+    return resolveVisiblePage(current);
+  }
+  const nextIndex = clamp(index + direction, 0, visible.length - 1);
+  return visible[nextIndex];
 }
 
 async function refreshViewer(
@@ -656,6 +862,7 @@ async function refreshViewer(
   overlay,
   drawLayer,
   highlightLayer,
+  shapeLayer,
   pageLabel,
   statusEl
 ) {
@@ -663,9 +870,14 @@ async function refreshViewer(
     return;
   }
   try {
-    await renderPageToCanvas(state.pdfDoc, state.currentPage, canvas);
-    renderInkLayers(drawLayer, highlightLayer, overlay);
+    state.currentPage = resolveVisiblePage(state.currentPage);
+    const rotation = state.pageProperties.rotations[state.currentPage] ?? 0;
+    await renderPageToCanvas(state.pdfDoc, state.currentPage, canvas, 1.2, rotation);
+    renderInkLayers(drawLayer, highlightLayer, overlay, shapeLayer);
     updatePageLabel(pageLabel);
+    if (pagePropertiesUi?.update) {
+      pagePropertiesUi.update();
+    }
     renderAnnotations(overlay, statusEl);
   } catch (error) {
     setStatus(statusEl, `Render failed: ${error.message}`, true);
@@ -744,12 +956,15 @@ function renderAssetList(assetList, statusEl) {
   });
 }
 
-function renderInkLayers(drawLayer, highlightLayer, overlay) {
+function renderInkLayers(drawLayer, highlightLayer, overlay, shapeLayer) {
   if (!drawLayer || !highlightLayer || !overlay) {
     return;
   }
   const { width, height } = getOverlayBounds(overlay);
   const layers = [drawLayer, highlightLayer];
+  if (shapeLayer) {
+    layers.push(shapeLayer);
+  }
   layers.forEach((layer) => {
     layer.setAttribute("viewBox", `0 0 ${width} ${height}`);
     layer.setAttribute("width", width);
@@ -795,6 +1010,146 @@ function renderInkLayers(drawLayer, highlightLayer, overlay) {
     path.dataset.role = "draw-path";
     drawLayer.append(path);
   });
+
+  if (shapeLayer) {
+    renderShapeLayer(shapeLayer, overlay);
+  }
+}
+
+function renderShapeLayer(shapeLayer, overlay) {
+  const currentShapes = state.shapeAnnotations.filter(
+    (annotation) => annotation.pageNumber === state.currentPage
+  );
+  const draft = state.shapeDraft && state.shapeDraft.pageNumber === state.currentPage
+    ? state.shapeDraft
+    : null;
+  const items = draft ? [...currentShapes, draft] : currentShapes;
+
+  items.forEach((annotation) => {
+    const { shapeType, geometry, style } = annotation;
+    const strokeColor = style?.strokeColor ?? "#111111";
+    const strokeWidth = style?.strokeWidth ?? 2;
+    const fillColor = style?.fillColor ?? "";
+    const opacity = style?.opacity ?? 1;
+    if (shapeType === "rect") {
+      const rect = createSvgElement("rect");
+      rect.setAttribute("x", geometry.x ?? 0);
+      rect.setAttribute("y", geometry.y ?? 0);
+      rect.setAttribute("width", geometry.width ?? 0);
+      rect.setAttribute("height", geometry.height ?? 0);
+      rect.setAttribute("fill", fillColor || "none");
+      rect.setAttribute("stroke", strokeColor);
+      rect.setAttribute("stroke-width", strokeWidth);
+      rect.setAttribute("opacity", opacity);
+      rect.dataset.role = "shape-rect";
+      shapeLayer.append(rect);
+      return;
+    }
+    if (shapeType === "ellipse") {
+      const ellipse = createSvgElement("ellipse");
+      const cx = (geometry.x ?? 0) + (geometry.width ?? 0) / 2;
+      const cy = (geometry.y ?? 0) + (geometry.height ?? 0) / 2;
+      ellipse.setAttribute("cx", cx);
+      ellipse.setAttribute("cy", cy);
+      ellipse.setAttribute("rx", Math.abs(geometry.width ?? 0) / 2);
+      ellipse.setAttribute("ry", Math.abs(geometry.height ?? 0) / 2);
+      ellipse.setAttribute("fill", fillColor || "none");
+      ellipse.setAttribute("stroke", strokeColor);
+      ellipse.setAttribute("stroke-width", strokeWidth);
+      ellipse.setAttribute("opacity", opacity);
+      ellipse.dataset.role = "shape-ellipse";
+      shapeLayer.append(ellipse);
+      return;
+    }
+    if (shapeType === "line" || shapeType === "arrow") {
+      const points = geometry.points ?? [];
+      if (points.length < 2) {
+        return;
+      }
+      const line = createSvgElement("line");
+      line.setAttribute("x1", points[0].x);
+      line.setAttribute("y1", points[0].y);
+      line.setAttribute("x2", points[points.length - 1].x);
+      line.setAttribute("y2", points[points.length - 1].y);
+      line.setAttribute("stroke", strokeColor);
+      line.setAttribute("stroke-width", strokeWidth);
+      line.setAttribute("opacity", opacity);
+      line.dataset.role = "shape-line";
+      shapeLayer.append(line);
+
+      if (shapeType === "arrow") {
+        const arrow = createSvgElement("path");
+        const end = points[points.length - 1];
+        const start = points[points.length - 2] ?? points[0];
+        const angle = Math.atan2(end.y - start.y, end.x - start.x);
+        const size = Math.max(10, strokeWidth * 3);
+        const leftX = end.x - size * Math.cos(angle - Math.PI / 6);
+        const leftY = end.y - size * Math.sin(angle - Math.PI / 6);
+        const rightX = end.x - size * Math.cos(angle + Math.PI / 6);
+        const rightY = end.y - size * Math.sin(angle + Math.PI / 6);
+        arrow.setAttribute(
+          "d",
+          `M ${leftX} ${leftY} L ${end.x} ${end.y} L ${rightX} ${rightY}`
+        );
+        arrow.setAttribute("fill", "none");
+        arrow.setAttribute("stroke", strokeColor);
+        arrow.setAttribute("stroke-width", strokeWidth);
+        arrow.setAttribute("opacity", opacity);
+        arrow.dataset.role = "shape-arrow";
+        shapeLayer.append(arrow);
+      }
+      return;
+    }
+    if (shapeType === "polygon" || shapeType === "cloud") {
+      const points = geometry.points ?? [];
+      const previewPoint = annotation.previewPoint;
+      const pathPoints = previewPoint ? [...points, previewPoint] : points;
+      if (points.length < 2) {
+        return;
+      }
+      const path = createSvgElement("path");
+      const pathData = buildShapePath(pathPoints, shapeType === "cloud");
+      path.setAttribute("d", pathData);
+      path.setAttribute("fill", fillColor || "none");
+      path.setAttribute("stroke", strokeColor);
+      path.setAttribute("stroke-width", strokeWidth);
+      path.setAttribute("opacity", opacity);
+      path.dataset.role = shapeType === "cloud" ? "shape-cloud" : "shape-polygon";
+      shapeLayer.append(path);
+    }
+  });
+}
+
+function buildShapePath(points, isCloud) {
+  if (!points.length) {
+    return "";
+  }
+  if (!isCloud) {
+    return (
+      `M ${points[0].x} ${points[0].y} ` +
+      points
+        .slice(1)
+        .map((point) => `L ${point.x} ${point.y}`)
+        .join(" ") +
+      " Z"
+    );
+  }
+  const segments = [];
+  for (let i = 0; i < points.length; i += 1) {
+    const current = points[i];
+    const next = points[(i + 1) % points.length];
+    const midX = (current.x + next.x) / 2;
+    const midY = (current.y + next.y) / 2;
+    const offsetX = (next.y - current.y) * 0.15;
+    const offsetY = (current.x - next.x) * 0.15;
+    const controlX = midX + offsetX;
+    const controlY = midY + offsetY;
+    if (i === 0) {
+      segments.push(`M ${current.x} ${current.y}`);
+    }
+    segments.push(`Q ${controlX} ${controlY} ${next.x} ${next.y}`);
+  }
+  return `${segments.join(" ")} Z`;
 }
 
 function renderAnnotations(overlay, statusEl) {
@@ -1486,6 +1841,7 @@ async function loadPdfBytes(
   overlay,
   drawLayer,
   highlightLayer,
+  shapeLayer,
   pageLabel,
   pageList,
   applyButton,
@@ -1514,11 +1870,19 @@ async function loadPdfBytes(
   state.selectedTextElement = null;
   state.drawAnnotations = [];
   state.highlightAnnotations = [];
+  state.shapeAnnotations = [];
+  state.shapeDraft = null;
   state.signatureAnnotations = [];
   state.commentAnnotations = [];
   state.stampAnnotations = [];
   state.selectedStampId = null;
   state.commentsVisible = true;
+  state.pageProperties = {
+    rotations: {},
+    hidden: new Set(),
+    deleted: new Set(),
+    duplicates: {}
+  };
   state.textDefaults = {
     fontSize: 12,
     fontFamily: "Helvetica",
@@ -1532,7 +1896,13 @@ async function loadPdfBytes(
     highlight: { color: "#f59e0b", opacity: 0.35 },
     comment: { color: "#111111", text: "Comment" },
     stamp: { text: "APPROVED", color: "#111111" },
-    mark: { color: "#b91c1c" },
+    shapes: {
+      shapeType: "rect",
+      strokeColor: "#2563eb",
+      strokeWidth: 3,
+      fillColor: "",
+      opacity: 1
+    },
     signature: { name: "" }
   };
   state.signaturePlacementMode = "full";
@@ -1541,7 +1911,15 @@ async function loadPdfBytes(
   }
   renderPageList(pageList, applyButton);
   updatePageLabel(pageLabel);
-  await refreshViewer(canvas, overlay, drawLayer, highlightLayer, pageLabel, statusEl);
+  await refreshViewer(
+    canvas,
+    overlay,
+    drawLayer,
+    highlightLayer,
+    shapeLayer,
+    pageLabel,
+    statusEl
+  );
   setStatus(statusEl, "PDF loaded successfully.");
 }
 
@@ -1611,6 +1989,10 @@ export function initApp(root) {
     toolButtons.forEach((button, id) => {
       button.dataset.active = id === toolId ? "true" : "false";
     });
+    state.paneOpen.settings = false;
+    if (toolId !== "shapes") {
+      state.shapeDraft = null;
+    }
     if (overlay) {
       overlay.dataset.mode = toolId;
       const editable = toolId === "text";
@@ -1741,13 +2123,14 @@ export function initApp(root) {
         overlay,
         drawLayer,
         highlightLayer,
+        shapeLayer,
         pageLabel,
         pageList,
         applyReorderButton,
         pendingSession
       );
       renderAssetList(assetList, status);
-      renderInkLayers(drawLayer, highlightLayer, overlay);
+      renderInkLayers(drawLayer, highlightLayer, overlay, shapeLayer);
       renderAnnotations(overlay, status);
       setStatus(status, "Session restored.");
     } catch (error) {
@@ -1778,29 +2161,51 @@ export function initApp(root) {
       return;
     }
     try {
-      let exportBytes = state.currentBytes;
-      if (state.highlightAnnotations.length > 0) {
-        exportBytes = await applyHighlightAnnotations(exportBytes, state.highlightAnnotations);
+      const exportPageOrder = buildExportPageOrder();
+      if (!exportPageOrder.length) {
+        setStatus(status, "No visible pages to export.", true);
+        return;
       }
-      if (state.imageAnnotations.length > 0) {
-        exportBytes = await applyImageAnnotations(
-          exportBytes,
-          state.imageAssets,
-          state.imageAnnotations
-        );
+      let exportBytes = await applyPageProperties(
+        state.currentBytes,
+        exportPageOrder,
+        state.pageProperties.rotations
+      );
+      const exportHighlights = remapAnnotationsForExport(
+        state.highlightAnnotations,
+        exportPageOrder
+      );
+      if (exportHighlights.length > 0) {
+        exportBytes = await applyHighlightAnnotations(exportBytes, exportHighlights);
       }
-      const exportTextAnnotations = buildExportTextAnnotations();
+      const exportImages = remapAnnotationsForExport(
+        state.imageAnnotations,
+        exportPageOrder
+      );
+      if (exportImages.length > 0) {
+        exportBytes = await applyImageAnnotations(exportBytes, state.imageAssets, exportImages);
+      }
+      const exportTextAnnotations = remapAnnotationsForExport(
+        buildExportTextAnnotations(),
+        exportPageOrder
+      );
       if (exportTextAnnotations.length > 0) {
         exportBytes = await applyTextAnnotations(exportBytes, exportTextAnnotations);
       }
-      if (state.signatureAnnotations.length > 0) {
-        exportBytes = await applySignatureAnnotations(
-          exportBytes,
-          state.signatureAnnotations
-        );
+      const exportSignatures = remapAnnotationsForExport(
+        state.signatureAnnotations,
+        exportPageOrder
+      );
+      if (exportSignatures.length > 0) {
+        exportBytes = await applySignatureAnnotations(exportBytes, exportSignatures);
       }
-      if (state.drawAnnotations.length > 0) {
-        exportBytes = await applyDrawAnnotations(exportBytes, state.drawAnnotations);
+      const exportDraws = remapAnnotationsForExport(state.drawAnnotations, exportPageOrder);
+      if (exportDraws.length > 0) {
+        exportBytes = await applyDrawAnnotations(exportBytes, exportDraws);
+      }
+      const exportShapes = remapAnnotationsForExport(state.shapeAnnotations, exportPageOrder);
+      if (exportShapes.length > 0) {
+        exportBytes = await applyShapeAnnotations(exportBytes, exportShapes);
       }
       const blob = new Blob([exportBytes], { type: "application/pdf" });
       const url = URL.createObjectURL(blob);
@@ -1820,10 +2225,10 @@ export function initApp(root) {
 
   const settingsPanel = document.createElement("div");
   settingsPanel.className = "settings-panel";
-  settingsPanel.hidden = true;
 
   const settingsButton = createButton("Settings", () => {
-    settingsPanel.hidden = !settingsPanel.hidden;
+    state.paneOpen.settings = !state.paneOpen.settings;
+    renderPanes();
   });
   settingsButton.dataset.role = "settings-button";
 
@@ -1920,6 +2325,7 @@ export function initApp(root) {
         overlay,
         drawLayer,
         highlightLayer,
+        shapeLayer,
         pageLabel,
         pageList,
         applyReorderButton
@@ -1970,6 +2376,7 @@ export function initApp(root) {
         overlay,
         drawLayer,
         highlightLayer,
+        shapeLayer,
         pageLabel,
         pageList,
         applyReorderButton
@@ -2009,6 +2416,7 @@ export function initApp(root) {
         overlay,
         drawLayer,
         highlightLayer,
+        shapeLayer,
         pageLabel,
         pageList,
         applyReorderButton
@@ -2040,6 +2448,11 @@ export function initApp(root) {
   highlightLayer.dataset.role = "highlight-layer";
   highlightLayer.setAttribute("aria-hidden", "true");
 
+  const shapeLayer = createSvgElement("svg");
+  shapeLayer.classList.add("ink-layer", "shape-layer");
+  shapeLayer.dataset.role = "shape-layer";
+  shapeLayer.setAttribute("aria-hidden", "true");
+
   const drawLayer = createSvgElement("svg");
   drawLayer.classList.add("ink-layer", "draw-layer");
   drawLayer.dataset.role = "draw-layer";
@@ -2051,6 +2464,7 @@ export function initApp(root) {
   overlay.dataset.mode = state.activeTool;
   let activeDraw = null;
   let activeHighlight = null;
+  let activeShape = null;
   overlay.addEventListener("dragover", (event) => {
     event.preventDefault();
     overlay.classList.add("drag-over");
@@ -2063,7 +2477,11 @@ export function initApp(root) {
     if (event.button !== 0) {
       return;
     }
-    if (state.activeTool !== "draw" && state.activeTool !== "highlight") {
+    if (
+      state.activeTool !== "draw" &&
+      state.activeTool !== "highlight" &&
+      state.activeTool !== "shapes"
+    ) {
       return;
     }
     event.preventDefault();
@@ -2103,13 +2521,49 @@ export function initApp(root) {
         overlayHeight: bounds.height
       };
       state.highlightAnnotations = [...state.highlightAnnotations, activeHighlight];
+    } else if (state.activeTool === "shapes") {
+      const shapeType = state.toolDefaults.shapes.shapeType;
+      if (shapeType === "polygon" || shapeType === "cloud") {
+        if (!state.shapeDraft || state.shapeDraft.shapeType !== shapeType) {
+          state.shapeDraft = {
+            id: createId("shape"),
+            pageNumber: state.currentPage,
+            shapeType,
+            geometry: { points: [start] },
+            style: { ...state.toolDefaults.shapes },
+            previewPoint: start,
+            overlayWidth: bounds.width,
+            overlayHeight: bounds.height
+          };
+        } else {
+          state.shapeDraft.geometry.points.push(start);
+        }
+        renderInkLayers(drawLayer, highlightLayer, overlay, shapeLayer);
+        return;
+      }
+      activeShape = {
+        id: createId("shape"),
+        pageNumber: state.currentPage,
+        shapeType,
+        geometry: {
+          x: start.x,
+          y: start.y,
+          width: 0,
+          height: 0,
+          points: [start, start]
+        },
+        style: { ...state.toolDefaults.shapes },
+        overlayWidth: bounds.width,
+        overlayHeight: bounds.height
+      };
+      state.shapeDraft = activeShape;
     }
-    renderInkLayers(drawLayer, highlightLayer, overlay);
+    renderInkLayers(drawLayer, highlightLayer, overlay, shapeLayer);
 
     const onMove = (moveEvent) => {
       if (state.activeTool === "draw" && activeDraw) {
         activeDraw.points.push(getOverlayPoint(moveEvent, overlay));
-        renderInkLayers(drawLayer, highlightLayer, overlay);
+        renderInkLayers(drawLayer, highlightLayer, overlay, shapeLayer);
       }
       if (state.activeTool === "highlight" && activeHighlight) {
         const current = getOverlayPoint(moveEvent, overlay);
@@ -2117,7 +2571,33 @@ export function initApp(root) {
         activeHighlight.y = Math.min(start.y, current.y);
         activeHighlight.width = Math.abs(current.x - start.x);
         activeHighlight.height = Math.abs(current.y - start.y);
-        renderInkLayers(drawLayer, highlightLayer, overlay);
+        renderInkLayers(drawLayer, highlightLayer, overlay, shapeLayer);
+      }
+      if (state.activeTool === "shapes") {
+        const current = getOverlayPoint(moveEvent, overlay);
+        if (activeShape && activeShape.geometry) {
+          const minX = Math.min(start.x, current.x);
+          const minY = Math.min(start.y, current.y);
+          const maxX = Math.max(start.x, current.x);
+          const maxY = Math.max(start.y, current.y);
+          if (activeShape.shapeType === "line" || activeShape.shapeType === "arrow") {
+            activeShape.geometry.points = [start, current];
+          } else {
+            activeShape.geometry.x = minX;
+            activeShape.geometry.y = minY;
+            activeShape.geometry.width = maxX - minX;
+            activeShape.geometry.height = maxY - minY;
+          }
+          renderInkLayers(drawLayer, highlightLayer, overlay, shapeLayer);
+        }
+        if (
+          state.shapeDraft &&
+          (state.shapeDraft.shapeType === "polygon" ||
+            state.shapeDraft.shapeType === "cloud")
+        ) {
+          state.shapeDraft.previewPoint = current;
+          renderInkLayers(drawLayer, highlightLayer, overlay, shapeLayer);
+        }
       }
     };
 
@@ -2131,7 +2611,18 @@ export function initApp(root) {
       }
       activeDraw = null;
       activeHighlight = null;
-      renderInkLayers(drawLayer, highlightLayer, overlay);
+      if (activeShape && activeShape.shapeType !== "polygon" && activeShape.shapeType !== "cloud") {
+        const isLine = activeShape.shapeType === "line" || activeShape.shapeType === "arrow";
+        const hasSize = isLine
+          ? activeShape.geometry.points?.length === 2
+          : activeShape.geometry.width > 2 && activeShape.geometry.height > 2;
+        if (hasSize) {
+          state.shapeAnnotations = [...state.shapeAnnotations, activeShape];
+        }
+        state.shapeDraft = null;
+        activeShape = null;
+      }
+      renderInkLayers(drawLayer, highlightLayer, overlay, shapeLayer);
       scheduleSessionSave();
     };
 
@@ -2309,6 +2800,44 @@ export function initApp(root) {
     }
   });
 
+  overlay.addEventListener("pointermove", (event) => {
+    if (state.activeTool !== "shapes") {
+      return;
+    }
+    if (
+      state.shapeDraft &&
+      (state.shapeDraft.shapeType === "polygon" || state.shapeDraft.shapeType === "cloud")
+    ) {
+      state.shapeDraft.previewPoint = getOverlayPoint(event, overlay);
+      renderInkLayers(drawLayer, highlightLayer, overlay, shapeLayer);
+    }
+  });
+
+  overlay.addEventListener("dblclick", (event) => {
+    if (state.activeTool !== "shapes") {
+      return;
+    }
+    if (
+      !state.shapeDraft ||
+      (state.shapeDraft.shapeType !== "polygon" && state.shapeDraft.shapeType !== "cloud")
+    ) {
+      return;
+    }
+    event.preventDefault();
+    const points = state.shapeDraft.geometry.points ?? [];
+    if (points.length < 3) {
+      return;
+    }
+    const finalized = {
+      ...state.shapeDraft,
+      previewPoint: null
+    };
+    state.shapeAnnotations = [...state.shapeAnnotations, finalized];
+    state.shapeDraft = null;
+    renderInkLayers(drawLayer, highlightLayer, overlay, shapeLayer);
+    scheduleSessionSave();
+  });
+
   overlay.addEventListener("drop", (event) => {
     event.preventDefault();
     overlay.classList.remove("drag-over");
@@ -2363,20 +2892,38 @@ export function initApp(root) {
 
   const canvasWrap = document.createElement("div");
   canvasWrap.className = "canvas-wrap";
-  canvasWrap.append(canvas, highlightLayer, overlay, drawLayer);
+  canvasWrap.append(canvas, highlightLayer, shapeLayer, overlay, drawLayer);
 
   const nav = document.createElement("div");
   nav.className = "nav";
   const prevButton = createButton("Previous", async () => {
-    if (state.currentPage > 1) {
-      state.currentPage -= 1;
-      await refreshViewer(canvas, overlay, drawLayer, highlightLayer, pageLabel, status);
+    const nextPage = getNeighborVisiblePage(state.currentPage, -1);
+    if (nextPage !== state.currentPage) {
+      state.currentPage = nextPage;
+      await refreshViewer(
+        canvas,
+        overlay,
+        drawLayer,
+        highlightLayer,
+        shapeLayer,
+        pageLabel,
+        status
+      );
     }
   });
   const nextButton = createButton("Next", async () => {
-    if (state.currentPage < state.pageCount) {
-      state.currentPage += 1;
-      await refreshViewer(canvas, overlay, drawLayer, highlightLayer, pageLabel, status);
+    const nextPage = getNeighborVisiblePage(state.currentPage, 1);
+    if (nextPage !== state.currentPage) {
+      state.currentPage = nextPage;
+      await refreshViewer(
+        canvas,
+        overlay,
+        drawLayer,
+        highlightLayer,
+        shapeLayer,
+        pageLabel,
+        status
+      );
     }
   });
   nav.append(prevButton, nextButton);
@@ -2674,8 +3221,10 @@ export function initApp(root) {
       const currentDrawAnnotations = state.drawAnnotations;
       const currentHighlightAnnotations = state.highlightAnnotations;
       const currentSignatureAnnotations = state.signatureAnnotations;
+      const currentShapeAnnotations = state.shapeAnnotations;
       const currentCommentAnnotations = state.commentAnnotations;
       const currentStampAnnotations = state.stampAnnotations;
+      const currentPageProperties = state.pageProperties;
       const pageMapping = new Map();
       state.pageOrder.forEach((oldPageNumber, index) => {
         pageMapping.set(oldPageNumber, index + 1);
@@ -2696,6 +3245,10 @@ export function initApp(root) {
         ...annotation,
         pageNumber: pageMapping.get(annotation.pageNumber) ?? annotation.pageNumber
       }));
+      const remappedShapeAnnotations = currentShapeAnnotations.map((annotation) => ({
+        ...annotation,
+        pageNumber: pageMapping.get(annotation.pageNumber) ?? annotation.pageNumber
+      }));
       const remappedSignatureAnnotations = currentSignatureAnnotations.map((annotation) => ({
         ...annotation,
         pageNumber: pageMapping.get(annotation.pageNumber) ?? annotation.pageNumber
@@ -2708,6 +3261,34 @@ export function initApp(root) {
         ...annotation,
         pageNumber: pageMapping.get(annotation.pageNumber) ?? annotation.pageNumber
       }));
+      const remappedRotations = {};
+      Object.entries(currentPageProperties.rotations ?? {}).forEach(([page, rotation]) => {
+        const mapped = pageMapping.get(Number(page));
+        if (mapped) {
+          remappedRotations[mapped] = rotation;
+        }
+      });
+      const remappedHidden = new Set();
+      currentPageProperties.hidden?.forEach((page) => {
+        const mapped = pageMapping.get(page);
+        if (mapped) {
+          remappedHidden.add(mapped);
+        }
+      });
+      const remappedDeleted = new Set();
+      currentPageProperties.deleted?.forEach((page) => {
+        const mapped = pageMapping.get(page);
+        if (mapped) {
+          remappedDeleted.add(mapped);
+        }
+      });
+      const remappedDuplicates = {};
+      Object.entries(currentPageProperties.duplicates ?? {}).forEach(([page, count]) => {
+        const mapped = pageMapping.get(Number(page));
+        if (mapped) {
+          remappedDuplicates[mapped] = count;
+        }
+      });
       const reorderedBytes = await reorderPdf(state.currentBytes, state.pageOrder);
       await loadPdfBytes(
         reorderedBytes,
@@ -2716,6 +3297,7 @@ export function initApp(root) {
         overlay,
         drawLayer,
         highlightLayer,
+        shapeLayer,
         pageLabel,
         pageList,
         applyReorderButton
@@ -2725,11 +3307,18 @@ export function initApp(root) {
       state.textAnnotations = remappedTextAnnotations;
       state.drawAnnotations = remappedDrawAnnotations;
       state.highlightAnnotations = remappedHighlightAnnotations;
+      state.shapeAnnotations = remappedShapeAnnotations;
       state.signatureAnnotations = remappedSignatureAnnotations;
       state.commentAnnotations = remappedCommentAnnotations;
       state.stampAnnotations = remappedStampAnnotations;
+      state.pageProperties = {
+        rotations: remappedRotations,
+        hidden: remappedHidden,
+        deleted: remappedDeleted,
+        duplicates: remappedDuplicates
+      };
       renderAssetList(assetList, status);
-      renderInkLayers(drawLayer, highlightLayer, overlay);
+      renderInkLayers(drawLayer, highlightLayer, overlay, shapeLayer);
       renderAnnotations(overlay, status);
       setStatus(status, "Reorder applied.");
       scheduleSessionSave();
@@ -2867,6 +3456,89 @@ export function initApp(root) {
     ]);
   };
 
+  const shapesPane = () => {
+    const shapeSelect = document.createElement("select");
+    [
+      { label: "Rectangle", value: "rect" },
+      { label: "Ellipse", value: "ellipse" },
+      { label: "Line", value: "line" },
+      { label: "Arrow", value: "arrow" },
+      { label: "Polygon", value: "polygon" },
+      { label: "Cloud", value: "cloud" }
+    ].forEach((shape) => {
+      const option = document.createElement("option");
+      option.value = shape.value;
+      option.textContent = shape.label;
+      shapeSelect.append(option);
+    });
+    shapeSelect.value = state.toolDefaults.shapes.shapeType;
+    shapeSelect.addEventListener("change", () => {
+      state.toolDefaults.shapes.shapeType = shapeSelect.value;
+      state.shapeDraft = null;
+    });
+
+    const strokeColor = document.createElement("input");
+    strokeColor.type = "color";
+    strokeColor.value = state.toolDefaults.shapes.strokeColor;
+    strokeColor.addEventListener("input", () => {
+      state.toolDefaults.shapes.strokeColor = strokeColor.value;
+    });
+
+    const strokeWidth = document.createElement("input");
+    strokeWidth.type = "number";
+    strokeWidth.min = "1";
+    strokeWidth.max = "20";
+    strokeWidth.value = String(state.toolDefaults.shapes.strokeWidth);
+    strokeWidth.addEventListener("change", () => {
+      const next = Number.parseInt(strokeWidth.value, 10);
+      if (Number.isFinite(next)) {
+        state.toolDefaults.shapes.strokeWidth = next;
+      }
+    });
+
+    const fillToggle = document.createElement("input");
+    fillToggle.type = "checkbox";
+    fillToggle.checked = !!state.toolDefaults.shapes.fillColor;
+    const fillColor = document.createElement("input");
+    fillColor.type = "color";
+    fillColor.value = state.toolDefaults.shapes.fillColor || "#ffffff";
+    fillColor.disabled = !fillToggle.checked;
+    fillToggle.addEventListener("change", () => {
+      fillColor.disabled = !fillToggle.checked;
+      state.toolDefaults.shapes.fillColor = fillToggle.checked ? fillColor.value : "";
+    });
+    fillColor.addEventListener("input", () => {
+      if (fillToggle.checked) {
+        state.toolDefaults.shapes.fillColor = fillColor.value;
+      }
+    });
+
+    const opacity = document.createElement("input");
+    opacity.type = "range";
+    opacity.min = "0.2";
+    opacity.max = "1";
+    opacity.step = "0.05";
+    opacity.value = String(state.toolDefaults.shapes.opacity ?? 1);
+    opacity.addEventListener("input", () => {
+      state.toolDefaults.shapes.opacity = Number(opacity.value);
+    });
+
+    const fillRow = document.createElement("div");
+    fillRow.className = "field";
+    const fillLabel = document.createElement("span");
+    fillLabel.textContent = "Fill enabled";
+    fillRow.append(fillLabel, fillToggle);
+
+    return placeholderPane("Click and drag to draw a shape.", [
+      createLabeledField("Shape type", shapeSelect),
+      createLabeledField("Stroke color", strokeColor),
+      createLabeledField("Stroke width", strokeWidth),
+      fillRow,
+      createLabeledField("Fill color", fillColor),
+      createLabeledField("Opacity", opacity)
+    ]);
+  };
+
   const commentPane = () => {
     const text = document.createElement("input");
     text.type = "text";
@@ -2921,17 +3593,158 @@ export function initApp(root) {
     ]);
   };
 
-  const markPane = () => {
-    const color = document.createElement("input");
-    color.type = "color";
-    color.value = state.toolDefaults.mark.color;
-    color.addEventListener("input", () => {
-      state.toolDefaults.mark.color = color.value;
+  const pagePropertiesPane = () => {
+    const panel = document.createElement("div");
+    panel.className = "panel";
+
+    const info = document.createElement("p");
+    info.className = "muted";
+
+    const rotationValue = document.createElement("span");
+    rotationValue.className = "muted";
+
+    const rotateLeft = createButton("Rotate Left", async () => {
+      const current = state.pageProperties.rotations[state.currentPage] ?? 0;
+      state.pageProperties.rotations[state.currentPage] = (current - 90 + 360) % 360;
+      updatePagePropertiesUi();
+      await refreshViewer(
+        canvas,
+        overlay,
+        drawLayer,
+        highlightLayer,
+        shapeLayer,
+        pageLabel,
+        status
+      );
     });
-    return placeholderPane("Page order tools live here.", [
-      createLabeledField("Marker color", color),
+    const rotateRight = createButton("Rotate Right", async () => {
+      const current = state.pageProperties.rotations[state.currentPage] ?? 0;
+      state.pageProperties.rotations[state.currentPage] = (current + 90) % 360;
+      updatePagePropertiesUi();
+      await refreshViewer(
+        canvas,
+        overlay,
+        drawLayer,
+        highlightLayer,
+        shapeLayer,
+        pageLabel,
+        status
+      );
+    });
+
+    const hideToggle = document.createElement("input");
+    hideToggle.type = "checkbox";
+    hideToggle.addEventListener("change", async () => {
+      if (hideToggle.checked) {
+        state.pageProperties.hidden.add(state.currentPage);
+      } else {
+        state.pageProperties.hidden.delete(state.currentPage);
+      }
+      updatePagePropertiesUi();
+      await refreshViewer(
+        canvas,
+        overlay,
+        drawLayer,
+        highlightLayer,
+        shapeLayer,
+        pageLabel,
+        status
+      );
+    });
+    const hideRow = createLabeledField("Hide in preview", hideToggle);
+
+    const deleteButton = createButton("Delete Page", async () => {
+      const confirmed = window.confirm("Delete this page from the export?");
+      if (!confirmed) {
+        return;
+      }
+      state.pageProperties.deleted.add(state.currentPage);
+      state.pageProperties.hidden.delete(state.currentPage);
+      updatePagePropertiesUi();
+      await refreshViewer(
+        canvas,
+        overlay,
+        drawLayer,
+        highlightLayer,
+        shapeLayer,
+        pageLabel,
+        status
+      );
+    });
+    deleteButton.className = "secondary";
+
+    const restoreButton = createButton("Restore Page", async () => {
+      state.pageProperties.deleted.delete(state.currentPage);
+      updatePagePropertiesUi();
+      await refreshViewer(
+        canvas,
+        overlay,
+        drawLayer,
+        highlightLayer,
+        shapeLayer,
+        pageLabel,
+        status
+      );
+    });
+    restoreButton.className = "secondary";
+
+    const duplicateCount = document.createElement("span");
+    duplicateCount.className = "muted";
+
+    const duplicateButton = createButton("Duplicate Page", () => {
+      const current = state.pageProperties.duplicates[state.currentPage] ?? 0;
+      state.pageProperties.duplicates[state.currentPage] = current + 1;
+      updatePagePropertiesUi();
+      setStatus(status, "Page duplicated for export.");
+    });
+
+    const removeDuplicateButton = createButton("Remove Duplicate", () => {
+      const current = state.pageProperties.duplicates[state.currentPage] ?? 0;
+      if (current <= 0) {
+        return;
+      }
+      const next = current - 1;
+      if (next === 0) {
+        delete state.pageProperties.duplicates[state.currentPage];
+      } else {
+        state.pageProperties.duplicates[state.currentPage] = next;
+      }
+      updatePagePropertiesUi();
+    });
+    removeDuplicateButton.className = "secondary";
+
+    const updatePagePropertiesUi = () => {
+      info.textContent = `Page ${state.currentPage}`;
+      const rotation = state.pageProperties.rotations[state.currentPage] ?? 0;
+      rotationValue.textContent = `Rotation: ${rotation}°`;
+      const isHidden = state.pageProperties.hidden.has(state.currentPage);
+      const isDeleted = state.pageProperties.deleted.has(state.currentPage);
+      hideToggle.checked = isHidden;
+      hideToggle.disabled = isDeleted;
+      deleteButton.disabled = isDeleted;
+      restoreButton.hidden = !isDeleted;
+      const duplicates = state.pageProperties.duplicates[state.currentPage] ?? 0;
+      duplicateCount.textContent = `Duplicates queued: ${duplicates}`;
+      removeDuplicateButton.disabled = duplicates === 0;
+    };
+
+    pagePropertiesUi = { update: updatePagePropertiesUi };
+    updatePagePropertiesUi();
+
+    panel.append(
+      info,
+      rotationValue,
+      rotateLeft,
+      rotateRight,
+      hideRow,
+      deleteButton,
+      restoreButton,
+      duplicateCount,
+      duplicateButton,
+      removeDuplicateButton,
       reorderGroup
-    ]);
+    );
+    return panel;
   };
 
   let signatureUi = null;
@@ -3089,20 +3902,112 @@ export function initApp(root) {
     return panel;
   };
 
+  const splitPane = () => {
+    const panel = document.createElement("div");
+    panel.className = "panel";
+
+    const modeSelect = document.createElement("select");
+    [
+      { label: "Split by page ranges", value: "range" },
+      { label: "Extract selected pages", value: "pages" }
+    ].forEach((mode) => {
+      const option = document.createElement("option");
+      option.value = mode.value;
+      option.textContent = mode.label;
+      modeSelect.append(option);
+    });
+
+    const input = document.createElement("input");
+    input.type = "text";
+    input.placeholder = "1-3, 4-7";
+
+    const hint = document.createElement("p");
+    hint.className = "muted";
+    hint.textContent = "Use commas to separate ranges.";
+
+    const results = document.createElement("div");
+    results.className = "split-results";
+
+    const updateHint = () => {
+      if (modeSelect.value === "range") {
+        input.placeholder = "1-3, 4-7";
+        hint.textContent = "Each range becomes a new PDF.";
+      } else {
+        input.placeholder = "1, 3, 5-7";
+        hint.textContent = "Selected pages will be combined into one PDF.";
+      }
+    };
+    updateHint();
+    modeSelect.addEventListener("change", updateHint);
+
+    const splitButton = createButton("Split", async () => {
+      if (!state.currentBytes) {
+        setStatus(status, "Load a PDF before splitting.", true);
+        return;
+      }
+      const mode = modeSelect.value;
+      const { groups, error } = parsePageGroups(
+        input.value || "",
+        mode === "range" ? "range" : "pages",
+        state.pageCount
+      );
+      if (error) {
+        setStatus(status, error, true);
+        return;
+      }
+      try {
+        const outputs = await splitPdf(state.currentBytes, groups);
+        results.innerHTML = "";
+        outputs.forEach((bytes, index) => {
+          const row = document.createElement("div");
+          row.className = "split-row";
+          const label = document.createElement("span");
+          label.textContent =
+            mode === "range" ? `Range ${index + 1}` : "Extracted Pages";
+          const download = createButton("Download", () => {
+            const name =
+              mode === "range" ? `split-${index + 1}.pdf` : "extracted-pages.pdf";
+            downloadPdfBytes(bytes, name);
+          });
+          download.className = "secondary";
+          row.append(label, download);
+          results.append(row);
+        });
+        setStatus(status, "Split ready. Download each result.");
+      } catch (error) {
+        setStatus(status, `Split failed: ${error.message}`, true);
+      }
+    }, "primary");
+
+    panel.append(
+      createLabeledField("Split mode", modeSelect),
+      createLabeledField("Pages", input),
+      hint,
+      splitButton,
+      results
+    );
+
+    return panel;
+  };
+
   const panes = new Map();
   panes.set("text", createPane("text", "Text", textToolGroup));
   panes.set("image", createPane("image", "Images", assetGroup));
   panes.set("draw", createPane("draw", "Draw", drawPane()));
   panes.set("highlight", createPane("highlight", "Highlight", highlightPane()));
+  panes.set("shapes", createPane("shapes", "Shapes", shapesPane()));
   panes.set("comment", createPane("comment", "Comment", commentPane()));
   panes.set("stamp", createPane("stamp", "Stamp", stampPane()));
-  panes.set("mark", createPane("mark", "Mark", markPane()));
+  panes.set("page-properties", createPane("page-properties", "Page Properties", pagePropertiesPane()));
   panes.set("signature", createPane("signature", "Signature", signaturePane()));
+  panes.set("split", createPane("split", "Split", splitPane()));
+  panes.set("settings", createPane("settings", "Settings", settingsPanel));
 
   renderPanes = () => {
     paneRoot.innerHTML = "";
-    const activePaneId =
-      state.activeTool !== "select" && state.paneOpen[state.activeTool]
+    const activePaneId = state.paneOpen.settings
+      ? "settings"
+      : state.activeTool !== "select" && state.paneOpen[state.activeTool]
         ? state.activeTool
         : null;
     if (!activePaneId) {
@@ -3120,7 +4025,7 @@ export function initApp(root) {
 
   workspace.append(viewerGroup, paneRoot);
 
-  topBar.append(brand, fileActions, toolBar, actions, settingsPanel);
+  topBar.append(brand, fileActions, toolBar, actions);
 
   setActiveTool("select");
   renderPanes();

@@ -15,10 +15,13 @@ vi.mock("../src/pdfService.js", () => {
     },
     reorderPdf: async (bytes) => bytes,
     applyImageAnnotations: async (bytes) => bytes,
+    applyPageProperties: async (bytes) => bytes,
+    applyShapeAnnotations: async (bytes) => bytes,
     applyTextAnnotations: async (bytes) => bytes,
     applySignatureAnnotations: async (bytes) => bytes,
     applyDrawAnnotations: async (bytes) => bytes,
-    applyHighlightAnnotations: async (bytes) => bytes
+    applyHighlightAnnotations: async (bytes) => bytes,
+    splitPdf: async (bytes, groups) => groups.map(() => bytes)
   };
 });
 
@@ -238,8 +241,8 @@ describe("app shell", () => {
     overlay.dispatchEvent(dropEvent);
     expect(overlay.querySelectorAll(".annotation").length).toBe(1);
 
-    const markTool = root.querySelector("[data-role=\"tool-mark\"]");
-    markTool.click();
+    const propertiesTool = root.querySelector("[data-role=\"tool-page-properties\"]");
+    propertiesTool.click();
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const downButton = Array.from(root.querySelectorAll("button")).find(
@@ -534,6 +537,44 @@ describe("app shell", () => {
     expect(highlightLayer.querySelectorAll("[data-role=\"highlight-rect\"]").length).toBe(1);
   });
 
+  it("creates a shape annotation", async () => {
+    const root = setupDom();
+    initApp(root);
+    const loadInput = root.querySelector("[data-role=\"pdf-load\"]");
+    setInputFiles(loadInput, [
+      new File(["%PDF-1.4"], "shape.pdf", { type: "application/pdf" })
+    ]);
+    loadInput.dispatchEvent(new Event("change", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const shapeTool = root.querySelector("[data-role=\"tool-shapes\"]");
+    shapeTool.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const overlay = root.querySelector("[data-role=\"page-overlay\"]");
+    overlay.getBoundingClientRect = () => ({
+      width: 600,
+      height: 800,
+      left: 0,
+      top: 0,
+      right: 600,
+      bottom: 800
+    });
+    const down = new Event("pointerdown", { bubbles: true });
+    Object.defineProperty(down, "clientX", { value: 120 });
+    Object.defineProperty(down, "clientY", { value: 140 });
+    Object.defineProperty(down, "button", { value: 0 });
+    overlay.dispatchEvent(down);
+    const move = new Event("pointermove");
+    Object.defineProperty(move, "clientX", { value: 220 });
+    Object.defineProperty(move, "clientY", { value: 240 });
+    window.dispatchEvent(move);
+    window.dispatchEvent(new Event("pointerup"));
+
+    const shapeLayer = root.querySelector("[data-role=\"shape-layer\"]");
+    expect(shapeLayer.querySelectorAll("[data-role=\"shape-rect\"]").length).toBe(1);
+  });
+
   it("switches tools and shows only one pane", async () => {
     const root = setupDom();
     initApp(root);
@@ -580,6 +621,19 @@ describe("app shell", () => {
     window.dispatchEvent(new Event("pointerup"));
     expect(pane.style.left).toBeTruthy();
     expect(pane.style.top).toBeTruthy();
+  });
+
+  it("toggles the settings pane", async () => {
+    const root = setupDom();
+    initApp(root);
+    const settingsButton = root.querySelector("[data-role=\"settings-button\"]");
+    settingsButton.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(root.querySelector("[data-role=\"pane-settings\"]")).toBeTruthy();
+
+    settingsButton.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(root.querySelector("[data-role=\"pane-settings\"]")).toBeFalsy();
   });
 
   it("renders six signature variants", async () => {

@@ -1,6 +1,6 @@
 import * as pdfjsLib from "pdfjs-dist/build/pdf";
 import pdfjsWorker from "pdfjs-dist/build/pdf.worker?worker";
-import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+import { PDFDocument, StandardFonts, degrees, rgb } from "pdf-lib";
 import fontkit from "@pdf-lib/fontkit";
 import { SIGNATURE_LAYOUT, SIGNATURE_VARIANTS, getSignatureVariant } from "./signatureData.js";
 
@@ -42,9 +42,15 @@ export async function loadPdfDocument(bytes) {
   return pdfDoc;
 }
 
-export async function renderPageToCanvas(pdfDoc, pageNumber, canvas, scale = 1.2) {
+export async function renderPageToCanvas(
+  pdfDoc,
+  pageNumber,
+  canvas,
+  scale = 1.2,
+  rotation = 0
+) {
   const page = await pdfDoc.getPage(pageNumber);
-  const viewport = page.getViewport({ scale });
+  const viewport = page.getViewport({ scale, rotation });
   const context = canvas.getContext("2d");
   canvas.width = viewport.width;
   canvas.height = viewport.height;
@@ -279,6 +285,41 @@ async function loadSignatureFontBytes(variant) {
   }
 }
 
+export async function splitPdf(bytes, pageGroups) {
+  const source = await PDFDocument.load(bytes);
+  const outputs = [];
+  for (const group of pageGroups) {
+    if (!group.length) {
+      continue;
+    }
+    const target = await PDFDocument.create();
+    const indices = group.map((pageNumber) => pageNumber - 1);
+    const pages = await target.copyPages(source, indices);
+    pages.forEach((page) => target.addPage(page));
+    outputs.push(await target.save());
+  }
+  return outputs;
+}
+
+export async function applyPageProperties(bytes, pageOrder, rotations = {}) {
+  if (!pageOrder || !pageOrder.length) {
+    return bytes;
+  }
+  const source = await PDFDocument.load(bytes);
+  const target = await PDFDocument.create();
+  const indices = pageOrder.map((pageNumber) => pageNumber - 1);
+  const pages = await target.copyPages(source, indices);
+  pages.forEach((page, index) => {
+    const pageNumber = pageOrder[index];
+    const rotation = rotations[pageNumber] ?? 0;
+    if (rotation) {
+      page.setRotation(degrees(rotation));
+    }
+    target.addPage(page);
+  });
+  return target.save();
+}
+
 function fitSignatureFontSize(font, text, width, height, letterSpacingFactor) {
   const paddedWidth = Math.max(10, width - SIGNATURE_LAYOUT.paddingX * 2);
   const paddedHeight = Math.max(10, height - SIGNATURE_LAYOUT.paddingY * 2);
@@ -501,6 +542,188 @@ export async function applyHighlightAnnotations(bytes, annotations) {
   }
 
   return pdfDoc.save();
+}
+
+export async function applyShapeAnnotations(bytes, annotations) {
+  if (!annotations.length) {
+    return bytes;
+  }
+  const sourceBytes = bytes instanceof Uint8Array ? bytes.slice() : new Uint8Array(bytes);
+  const pdfDoc = await PDFDocument.load(sourceBytes);
+
+  for (const annotation of annotations) {
+    const pageIndex = Math.max(
+      0,
+      Math.min(annotation.pageNumber - 1, pdfDoc.getPageCount() - 1)
+    );
+    const page = pdfDoc.getPage(pageIndex);
+    const { width: pageWidth, height: pageHeight } = page.getSize();
+    if (!annotation.overlayWidth || !annotation.overlayHeight) {
+      throw new Error("Missing overlay size for shape placement.");
+    }
+    const overlaySize = {
+      width: annotation.overlayWidth,
+      height: annotation.overlayHeight
+    };
+    const style = annotation.style ?? {};
+    const strokeColor = parseHexColor(style.strokeColor ?? "#111111");
+    const fillColor = style.fillColor ? parseHexColor(style.fillColor) : null;
+    const opacity = style.opacity ?? 1;
+    const scaleX = pageWidth / overlaySize.width;
+    const scaleY = pageHeight / overlaySize.height;
+    const strokeScale = (scaleX + scaleY) / 2;
+    const strokeWidth = (style.strokeWidth ?? 2) * strokeScale;
+
+    if (annotation.shapeType === "rect") {
+      const pdfRect = convertOverlayRectToPdfRect(
+        {
+          x: annotation.geometry.x ?? 0,
+          y: annotation.geometry.y ?? 0,
+          width: annotation.geometry.width ?? 0,
+          height: annotation.geometry.height ?? 0
+        },
+        { width: pageWidth, height: pageHeight },
+        overlaySize
+      );
+      page.drawRectangle({
+        x: pdfRect.x,
+        y: pdfRect.y,
+        width: pdfRect.width,
+        height: pdfRect.height,
+        borderWidth: strokeWidth,
+        borderColor: strokeColor,
+        color: fillColor ?? undefined,
+        opacity
+      });
+      continue;
+    }
+
+    if (annotation.shapeType === "ellipse") {
+      const pdfRect = convertOverlayRectToPdfRect(
+        {
+          x: annotation.geometry.x ?? 0,
+          y: annotation.geometry.y ?? 0,
+          width: annotation.geometry.width ?? 0,
+          height: annotation.geometry.height ?? 0
+        },
+        { width: pageWidth, height: pageHeight },
+        overlaySize
+      );
+      page.drawEllipse({
+        x: pdfRect.x + pdfRect.width / 2,
+        y: pdfRect.y + pdfRect.height / 2,
+        xScale: pdfRect.width / 2,
+        yScale: pdfRect.height / 2,
+        borderWidth: strokeWidth,
+        borderColor: strokeColor,
+        color: fillColor ?? undefined,
+        opacity
+      });
+      continue;
+    }
+
+    if (annotation.shapeType === "line" || annotation.shapeType === "arrow") {
+      const points = annotation.geometry.points ?? [];
+      if (points.length < 2) {
+        continue;
+      }
+      const start = convertOverlayPointToPdfPoint(
+        points[0],
+        { width: pageWidth, height: pageHeight },
+        overlaySize
+      );
+      const end = convertOverlayPointToPdfPoint(
+        points[points.length - 1],
+        { width: pageWidth, height: pageHeight },
+        overlaySize
+      );
+      page.drawLine({
+        start,
+        end,
+        thickness: strokeWidth,
+        color: strokeColor,
+        opacity
+      });
+      if (annotation.shapeType === "arrow") {
+        const angle = Math.atan2(end.y - start.y, end.x - start.x);
+        const size = Math.max(8, strokeWidth * 3);
+        const left = {
+          x: end.x - size * Math.cos(angle - Math.PI / 6),
+          y: end.y - size * Math.sin(angle - Math.PI / 6)
+        };
+        const right = {
+          x: end.x - size * Math.cos(angle + Math.PI / 6),
+          y: end.y - size * Math.sin(angle + Math.PI / 6)
+        };
+        page.drawLine({
+          start: left,
+          end,
+          thickness: strokeWidth,
+          color: strokeColor,
+          opacity
+        });
+        page.drawLine({
+          start: right,
+          end,
+          thickness: strokeWidth,
+          color: strokeColor,
+          opacity
+        });
+      }
+      continue;
+    }
+
+    if (annotation.shapeType === "polygon" || annotation.shapeType === "cloud") {
+      const points = annotation.geometry.points ?? [];
+      if (points.length < 2) {
+        continue;
+      }
+      const pdfPoints = points.map((point) =>
+        convertOverlayPointToPdfPoint(point, { width: pageWidth, height: pageHeight }, overlaySize)
+      );
+      const path = buildPdfShapePath(pdfPoints, annotation.shapeType === "cloud");
+      page.drawSvgPath(path, {
+        borderColor: strokeColor,
+        borderWidth: strokeWidth,
+        color: fillColor ?? undefined,
+        opacity
+      });
+    }
+  }
+
+  return pdfDoc.save();
+}
+
+function buildPdfShapePath(points, isCloud) {
+  if (!points.length) {
+    return "";
+  }
+  if (!isCloud) {
+    return (
+      `M ${points[0].x} ${points[0].y} ` +
+      points
+        .slice(1)
+        .map((point) => `L ${point.x} ${point.y}`)
+        .join(" ") +
+      " Z"
+    );
+  }
+  const segments = [];
+  for (let i = 0; i < points.length; i += 1) {
+    const current = points[i];
+    const next = points[(i + 1) % points.length];
+    const midX = (current.x + next.x) / 2;
+    const midY = (current.y + next.y) / 2;
+    const offsetX = (next.y - current.y) * 0.15;
+    const offsetY = (current.x - next.x) * 0.15;
+    const controlX = midX + offsetX;
+    const controlY = midY + offsetY;
+    if (i === 0) {
+      segments.push(`M ${current.x} ${current.y}`);
+    }
+    segments.push(`Q ${controlX} ${controlY} ${next.x} ${next.y}`);
+  }
+  return `${segments.join(" ")} Z`;
 }
 
 export async function applySignatureAnnotations(bytes, annotations) {

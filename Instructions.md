@@ -1695,3 +1695,347 @@ Do not refactor unrelated code.
 Preserve predictability, stability, and user trust.
 
 This is a professional, local-first tool — act accordingly.
+
+
+
+---------------------------------------------
+— Feature Expansion Pack 2 (PDF Split · Shapes · Page Properties · Settings Pane Fix) — AUTHORITATIVE
+
+## Purpose
+Extend the local-first document editor with additional **structural and annotation capabilities** while preserving all existing guarantees:
+- browser-only execution
+- offline capability
+- explicit user control
+- no backend, no sync, no analytics
+- no architectural rewrites
+
+This block **adds new authorized features** and **fixes a confirmed UX defect**.
+All work described here is approved and required.
+
+---
+
+## HARD GLOBAL CONSTRAINTS (NON-NEGOTIABLE)
+
+- No backend services
+- No network calls for PDF processing
+- No cloud storage or sync
+- No user accounts
+- No autosave to disk without user consent
+- No modification of original PDF bytes
+- All persistence must be local (IndexedDB / localStorage)
+- Export logic must continue to use `pdf-lib`
+- Offline behavior must remain intact
+- No refactors outside the scope defined below
+
+Violation of any constraint invalidates the implementation.
+
+---
+
+# FEATURE 4 — PDF SPLIT (LOCAL, EXPLICIT)
+
+## Goal
+Allow users to split a PDF into one or more new PDFs **locally**, with explicit user intent.
+
+This is a **structural document operation**, not annotation-based.
+
+---
+
+## Functional Requirements
+
+### Split Modes (v1)
+The Split tool must support:
+1. **Split by page range**
+   - Example: pages 1–3, 4–7
+2. **Extract selected pages**
+   - Arbitrary page selection
+
+Each split operation results in **new PDF files**.
+
+---
+
+## UX Flow
+
+1. User activates **Split** from the top bar
+2. **Split Pane** opens (movable, floating)
+3. User selects:
+   - page ranges OR pages
+4. User clicks **Split**
+5. App generates new PDF(s)
+6. User explicitly downloads each result
+
+---
+
+## Hard Rules
+
+- ❌ Never overwrite the original PDF
+- ❌ No automatic downloads
+- ❌ No background file writes
+- ❌ No cloud processing
+
+---
+
+## Export Rules
+
+- Use `pdf-lib` to copy pages
+- Preserve:
+  - page order
+  - page size
+  - content fidelity
+- Each output file must be a valid standalone PDF
+
+---
+
+## Tests (Required)
+
+- Split by range produces correct PDFs
+- Extracted pages match original content
+- Original PDF remains unchanged
+- Works fully offline
+
+---
+
+# FEATURE 5 — SHAPES TOOL (STRUCTURED DRAWING)
+
+## Goal
+Provide precise shape annotations distinct from freehand drawing.
+
+Shapes are **intentional geometry**, not sketches.
+
+---
+
+## Supported Shapes
+
+- Rectangle
+- Circle / Ellipse
+- Line
+- Arrow
+- Polygon
+- Cloud
+
+---
+
+## Functional Behavior
+
+1. User selects **Shapes** from top bar
+2. **Shapes Pane** opens
+3. User selects a shape type
+4. User draws on page overlay:
+   - click-drag for basic shapes
+   - click-to-place points for polygon/cloud
+5. Shape is committed on release / confirm
+
+---
+
+## Shape Properties (Editable)
+
+- Stroke color
+- Stroke width
+- Fill color (optional)
+- Opacity
+
+---
+
+## Data Model
+
+ts
+ShapeAnnotation {
+  id: string
+  pageNumber: number
+  shapeType: "rect" | "ellipse" | "line" | "arrow" | "polygon" | "cloud"
+  geometry: {
+    x?: number
+    y?: number
+    width?: number
+    height?: number
+    points?: { x: number; y: number }[]
+  }
+  style: {
+    strokeColor: string
+    strokeWidth: number
+    fillColor?: string
+    opacity?: number
+  }
+}
+Export Rules
+Shapes must export as vector graphics
+
+Use pdf-lib primitives (lines, paths)
+
+No rasterization
+
+Visual output must match overlay preview
+
+Tests (Required)
+Each shape type renders correctly
+
+Shapes export with correct geometry
+
+Style properties persist
+
+No regression to freehand drawing
+
+FEATURE 6 — PAGE PROPERTIES (RENAMED FROM “MARK”)
+Goal
+Replace the ambiguous “Mark” tool with a Page Properties tool focused on page-level operations.
+
+This is a semantic rename plus scope clarification.
+
+Authorized Page Properties
+Page rotation (90° increments)
+
+Page visibility toggle (hide/show in preview)
+
+Page duplication
+
+Page deletion (explicit confirmation required)
+
+UX Rules
+Page Properties opens a Page Properties Pane
+
+Pane applies only to the currently selected page
+
+Page-level actions must show confirmation for destructive changes
+
+Hard Rules
+❌ No implicit page deletion
+
+❌ No silent reordering
+
+❌ No auto-apply on click
+
+Export Rules
+Page properties must reflect in exported PDF
+
+Hidden pages:
+
+excluded from export
+
+Deleted pages:
+
+permanently removed in exported file only
+
+Original PDF remains untouched until export.
+
+Tests (Required)
+Page rotation exports correctly
+
+Hidden pages excluded from export
+
+Deleted pages removed only in output PDF
+
+Undo possible before export
+
+FEATURE 7 — SETTINGS PANE COLLAPSE FIX (BUG FIX)
+Goal
+Fix the Settings pane so it behaves consistently with all other panes.
+
+This is a required UX correction, not a feature request.
+
+Expected Behavior
+Settings pane must:
+
+toggle open/closed on click
+
+collapse when clicking outside (if enabled globally)
+
+close when switching tools (optional but consistent)
+
+Must not remain permanently expanded
+
+Hard Rules
+❌ No special-case logic for Settings
+
+❌ No pinned-always-open panes
+
+Settings must follow the same pane lifecycle rules as:
+
+Text Pane
+
+Shapes Pane
+
+Signature Pane
+
+Comment Pane
+
+Tests (Required)
+Settings pane opens on click
+
+Settings pane collapses on second click
+
+Pane state updates correctly
+
+No regression to theme or install UI
+
+FILE RESPONSIBILITIES
+app.js
+Split tool UI + logic
+
+Shapes tool UI + execution
+
+Page Properties pane
+
+Settings pane behavior fix
+
+Pane lifecycle management
+
+pdfService.js
+PDF split logic
+
+Shape export rendering
+
+Page property application on export
+
+storage.js
+Optional persistence of page visibility
+
+No autosave without consent
+
+sw.js / main.js
+❌ No changes allowed
+
+TESTING REQUIREMENTS (MANDATORY)
+Add or update tests for:
+
+PDF split outputs
+
+Shape creation and export
+
+Page property effects on export
+
+Settings pane toggle behavior
+
+Offline functionality remains intact
+
+Failing tests block completion.
+
+EXPLICITLY OUT OF SCOPE
+Cloud sync
+
+OCR
+
+AI features
+
+Cryptographic PDF signing
+
+Background exports
+
+Auto-save to disk
+
+COMPLETION CRITERIA
+This task is complete only when:
+
+PDFs can be split locally and explicitly
+
+Shapes tool works end-to-end
+
+“Mark” is fully replaced by “Page Properties”
+
+Settings pane collapses correctly
+
+Export behavior remains stable
+
+Offline use works
+
+All tests pass
+
+No regressions introduced

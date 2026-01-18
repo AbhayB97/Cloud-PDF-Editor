@@ -40,6 +40,9 @@ describe("theme", () => {
     const { initApp } = await import("../src/app.js");
     const root = setupDom();
     initApp(root);
+    const settingsButton = root.querySelector("[data-role=\"settings-button\"]");
+    settingsButton.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
     const select = root.querySelector("[data-role=\"theme-select\"]");
     select.value = "contrast";
     select.dispatchEvent(new Event("change"));

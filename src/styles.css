@@ -207,15 +207,6 @@ body {
 }
 
 .settings-panel {
-  position: absolute;
-  right: 16px;
-  top: calc(100% + 8px);
-  width: 260px;
-  padding: 16px;
-  border-radius: 12px;
-  background: var(--panel-bg);
-  border: 1px solid var(--panel-border);
-  box-shadow: 0 18px 30px rgba(0, 0, 0, 0.12);
   display: grid;
   gap: 12px;
 }
@@ -350,7 +341,8 @@ button:not(.primary) {
 }
 
 .page-overlay[data-mode="draw"],
-.page-overlay[data-mode="highlight"] {
+.page-overlay[data-mode="highlight"],
+.page-overlay[data-mode="shapes"] {
   cursor: crosshair;
   touch-action: none;
 }
@@ -365,6 +357,10 @@ button:not(.primary) {
 
 .highlight-layer {
   z-index: 1;
+}
+
+.shape-layer {
+  z-index: 2;
 }
 
 .draw-layer {
@@ -502,6 +498,18 @@ html[data-comments-visible="false"] [data-role="comment-annotation"] {
   text-align: center;
   width: 100%;
   pointer-events: none;
+}
+
+.split-results {
+  display: grid;
+  gap: 8px;
+}
+
+.split-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
 }
 
 .nav {
