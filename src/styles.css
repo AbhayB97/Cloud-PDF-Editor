@@ -1,3 +1,51 @@
+@font-face {
+  font-family: "Signature-Allura";
+  src: url("/fonts/Allura-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Signature-DancingScript";
+  src: url("/fonts/DancingScript-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Signature-GreatVibes";
+  src: url("/fonts/GreatVibes-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Signature-Pacifico";
+  src: url("/fonts/Pacifico-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Signature-Satisfy";
+  src: url("/fonts/Satisfy-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Signature-Yellowtail";
+  src: url("/fonts/Yellowtail-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
   color-scheme: light;
   font-family: "Segoe UI", Tahoma, sans-serif;
@@ -184,6 +232,43 @@ body {
   color: var(--error-text);
 }
 
+.recent-panel {
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  padding: 16px;
+  background: var(--panel-bg);
+  display: grid;
+  gap: 12px;
+}
+
+.recent-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.recent-item {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--panel-border);
+}
+
+.recent-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-weight: 600;
+}
+
+.recent-actions {
+  display: flex;
+  gap: 8px;
+}
+
 .panel {
   border: 1px solid var(--panel-border);
   border-radius: 12px;
@@ -336,6 +421,87 @@ button:not(.primary) {
   line-height: 1.2;
   overflow: hidden;
   cursor: text;
+}
+
+.signature-annotation {
+  position: absolute;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: var(--annotation-bg);
+  cursor: move;
+  display: flex;
+  align-items: center;
+}
+
+.signature-text {
+  white-space: nowrap;
+  width: 100%;
+  pointer-events: none;
+}
+
+.signature-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.signature-option {
+  width: 100%;
+  text-align: left;
+  border: 1px dashed var(--panel-border);
+  background: var(--asset-bg);
+  font-size: 20px;
+  padding: 10px 12px;
+}
+
+.signature-option[data-selected="true"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.comment-annotation {
+  position: absolute;
+  border-radius: 8px;
+  border: 1px solid var(--panel-border);
+  background: var(--annotation-bg);
+  padding: 8px;
+  font-size: 12px;
+  display: grid;
+  gap: 6px;
+}
+
+.comment-content {
+  outline: none;
+  white-space: pre-wrap;
+}
+
+html[data-comments-visible="false"] [data-role="comment-annotation"] {
+  display: none;
+}
+
+.stamp-annotation {
+  position: absolute;
+  border: 2px solid var(--accent);
+  border-radius: 10px;
+  background: var(--annotation-bg);
+  padding: 6px 10px;
+  text-transform: uppercase;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: move;
+}
+
+.stamp-annotation[data-selected="true"] {
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.25);
+}
+
+.stamp-text {
+  text-align: center;
+  width: 100%;
+  pointer-events: none;
 }
 
 .nav {

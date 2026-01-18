@@ -2,6 +2,7 @@ import {
   applyDrawAnnotations,
   applyHighlightAnnotations,
   applyImageAnnotations,
+  applySignatureAnnotations,
   applyTextAnnotations,
   isPdfBytes,
   isPdfFile,
@@ -11,7 +12,17 @@ import {
   renderPageToCanvas,
   reorderPdf
 } from "./pdfService.js";
-import { loadLastPdf, saveLastPdf } from "./storage.js";
+import {
+  clearSessionHistory,
+  clearSignatureProfile,
+  loadLastPdf,
+  loadSessionHistory,
+  loadSignatureProfile,
+  saveLastPdf,
+  saveSessionHistory,
+  saveSignatureProfile
+} from "./storage.js";
+import { SIGNATURE_LAYOUT, SIGNATURE_VARIANTS, getSignatureVariant } from "./signatureData.js";
 
 const state = {
   originalBytes: null,
@@ -43,11 +54,22 @@ const state = {
   toolDefaults: {
     draw: { color: "#2563eb", size: 4 },
     highlight: { color: "#f59e0b", opacity: 0.35 },
-    comment: { color: "#111111" },
+    comment: { color: "#111111", text: "Comment" },
     stamp: { text: "APPROVED", color: "#111111" },
     mark: { color: "#b91c1c" },
     signature: { name: "" }
-  }
+  },
+  signatureProfile: null,
+  signatureAnnotations: [],
+  signaturePlacementMode: "full",
+  commentsVisible: true,
+  commentAnnotations: [],
+  stampAnnotations: [],
+  selectedStampId: null,
+  sessionEntries: [],
+  sessionHistoryEnabled: true,
+  currentFileName: "",
+  currentFileHash: ""
 };
 
 const TOOL_DEFS = [
@@ -62,6 +84,8 @@ const TOOL_DEFS = [
   { id: "signature", label: "Signature" }
 ];
 
+let stampDeleteButton = null;
+
 function createButton(label, onClick, className) {
   const button = document.createElement("button");
   button.type = "button";
@@ -71,6 +95,16 @@ function createButton(label, onClick, className) {
   }
   button.addEventListener("click", onClick);
   return button;
+}
+
+function syncStampDeleteButton() {
+  if (!stampDeleteButton) {
+    return;
+  }
+  const hasSelection = state.stampAnnotations.some(
+    (item) => item.id === state.selectedStampId
+  );
+  stampDeleteButton.disabled = !hasSelection;
 }
 
 function setStatus(statusEl, message, isError = false) {
@@ -308,6 +342,111 @@ function applyTheme(theme) {
   window.localStorage?.setItem("cloud-pdf-theme", theme);
 }
 
+function getRememberHistoryPreference() {
+  if (typeof window === "undefined") {
+    return true;
+  }
+  const stored = window.localStorage?.getItem("cloud-pdf-history");
+  if (stored === null || stored === undefined) {
+    return true;
+  }
+  return stored === "true";
+}
+
+function setRememberHistoryPreference(value) {
+  window.localStorage?.setItem("cloud-pdf-history", value ? "true" : "false");
+}
+
+async function hashBytes(bytes) {
+  const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  if (typeof crypto !== "undefined" && crypto.subtle?.digest) {
+    try {
+      const digest = await crypto.subtle.digest("SHA-256", data);
+      return Array.from(new Uint8Array(digest))
+        .map((value) => value.toString(16).padStart(2, "0"))
+        .join("");
+    } catch {
+      // Fall back to a simple hash when SubtleCrypto is unavailable.
+    }
+  }
+  let hash = 0;
+  data.forEach((value) => {
+    hash = (hash * 31 + value) >>> 0;
+  });
+  return hash.toString(16);
+}
+
+function ensureSignatureFontsLoaded() {
+  if (typeof document === "undefined" || !document.fonts?.load) {
+    return Promise.resolve();
+  }
+  const loads = SIGNATURE_VARIANTS.map((variant) =>
+    document.fonts.load(`16px ${variant.cssFamily}`)
+  );
+  return Promise.all(loads).then(() => undefined);
+}
+
+function buildExportTextAnnotations() {
+  const comments = state.commentAnnotations.map((annotation) => ({
+    id: annotation.id,
+    pageNumber: annotation.pageNumber,
+    x: annotation.x,
+    y: annotation.y,
+    width: annotation.width,
+    height: annotation.height,
+    text: annotation.text ?? "",
+    fontSize: annotation.fontSize ?? 12,
+    fontFamily: "Helvetica",
+    color: annotation.color ?? "#111111",
+    overlayWidth: annotation.overlayWidth,
+    overlayHeight: annotation.overlayHeight
+  }));
+  const stamps = state.stampAnnotations.map((annotation) => ({
+    id: annotation.id,
+    pageNumber: annotation.pageNumber,
+    x: annotation.x,
+    y: annotation.y,
+    width: annotation.width,
+    height: annotation.height,
+    text: annotation.text ?? state.toolDefaults.stamp.text,
+    fontSize: annotation.fontSize ?? 20,
+    fontFamily: "Helvetica",
+    color: annotation.color ?? "#111111",
+    overlayWidth: annotation.overlayWidth,
+    overlayHeight: annotation.overlayHeight,
+    spans: [{ text: annotation.text ?? state.toolDefaults.stamp.text, bold: true }]
+  }));
+  return [...state.textAnnotations, ...comments, ...stamps];
+}
+
+function fitSignatureFontSize(text, fontFamily, width, height, spacingFactor = 0) {
+  if (!text) {
+    return SIGNATURE_LAYOUT.minFontSize;
+  }
+  const paddedWidth = Math.max(10, width - SIGNATURE_LAYOUT.paddingX * 2);
+  const paddedHeight = Math.max(10, height - SIGNATURE_LAYOUT.paddingY * 2);
+  let size = Math.max(SIGNATURE_LAYOUT.minFontSize, paddedHeight);
+  if (typeof document === "undefined") {
+    return size;
+  }
+  const canvas = fitSignatureFontSize.canvas || document.createElement("canvas");
+  fitSignatureFontSize.canvas = canvas;
+  const context = canvas.getContext("2d");
+  if (!context) {
+    return size;
+  }
+  while (size > SIGNATURE_LAYOUT.minFontSize) {
+    context.font = `${size}px ${fontFamily}`;
+    const spacing = size * spacingFactor;
+    const measured = context.measureText(text).width + spacing * Math.max(0, text.length - 1);
+    if (measured <= paddedWidth) {
+      return size;
+    }
+    size -= 1;
+  }
+  return SIGNATURE_LAYOUT.minFontSize;
+}
+
 function getImageDimensions(objectUrl) {
   if (typeof Image === "undefined") {
     return Promise.resolve({ width: 200, height: 200 });
@@ -327,6 +466,181 @@ function getImageDimensions(objectUrl) {
     };
     img.src = objectUrl;
   });
+}
+
+function serializeSessionAnnotations() {
+  const annotations = [];
+  state.imageAnnotations.forEach((annotation) => {
+    const asset = state.imageAssets.find((item) => item.id === annotation.assetId);
+    annotations.push({
+      type: "image",
+      ...annotation,
+      asset: asset
+        ? {
+            id: asset.id,
+            name: asset.name,
+            imageData:
+              asset.imageData instanceof Uint8Array
+                ? asset.imageData
+                : new Uint8Array(asset.imageData),
+            naturalWidth: asset.naturalWidth,
+            naturalHeight: asset.naturalHeight
+          }
+        : null
+    });
+  });
+  state.textAnnotations.forEach((annotation) =>
+    annotations.push({ type: "text", ...annotation })
+  );
+  state.drawAnnotations.forEach((annotation) =>
+    annotations.push({ type: "draw", ...annotation })
+  );
+  state.highlightAnnotations.forEach((annotation) =>
+    annotations.push({ type: "highlight", ...annotation })
+  );
+  state.signatureAnnotations.forEach((annotation) =>
+    annotations.push({ type: "signature", ...annotation })
+  );
+  state.commentAnnotations.forEach((annotation) =>
+    annotations.push({ type: "comment", ...annotation })
+  );
+  state.stampAnnotations.forEach((annotation) =>
+    annotations.push({ type: "stamp", ...annotation })
+  );
+  return annotations;
+}
+
+function applySessionAnnotations(annotations) {
+  const imageAssets = new Map();
+  const imageAnnotations = [];
+  const textAnnotations = [];
+  const drawAnnotations = [];
+  const highlightAnnotations = [];
+  const signatureAnnotations = [];
+  const commentAnnotations = [];
+  const stampAnnotations = [];
+
+  (annotations ?? []).forEach((annotation) => {
+    if (annotation.type === "image") {
+      if (annotation.asset) {
+        const asset = annotation.asset;
+        if (!imageAssets.has(asset.id)) {
+          const extension = (asset.name ?? "").toLowerCase();
+          const mimeType = extension.endsWith(".png") ? "image/png" : "image/jpeg";
+          let previewUrl = "";
+          if (typeof URL !== "undefined" && URL.createObjectURL) {
+            try {
+              previewUrl = URL.createObjectURL(
+                new Blob([asset.imageData], { type: mimeType })
+              );
+            } catch {
+              previewUrl = "";
+            }
+          }
+          imageAssets.set(asset.id, {
+            id: asset.id,
+            name: asset.name,
+            imageData: asset.imageData,
+            naturalWidth: asset.naturalWidth,
+            naturalHeight: asset.naturalHeight,
+            previewUrl
+          });
+        }
+      }
+      const { type, asset, ...rest } = annotation;
+      imageAnnotations.push(rest);
+      return;
+    }
+    if (annotation.type === "text") {
+      const { type, ...rest } = annotation;
+      textAnnotations.push(rest);
+      return;
+    }
+    if (annotation.type === "draw") {
+      const { type, ...rest } = annotation;
+      drawAnnotations.push(rest);
+      return;
+    }
+    if (annotation.type === "highlight") {
+      const { type, ...rest } = annotation;
+      highlightAnnotations.push(rest);
+      return;
+    }
+    if (annotation.type === "signature") {
+      const { type, ...rest } = annotation;
+      signatureAnnotations.push(rest);
+      return;
+    }
+    if (annotation.type === "comment") {
+      const { type, ...rest } = annotation;
+      commentAnnotations.push(rest);
+      return;
+    }
+    if (annotation.type === "stamp") {
+      const { type, ...rest } = annotation;
+      stampAnnotations.push(rest);
+      return;
+    }
+  });
+
+  state.imageAssets = Array.from(imageAssets.values());
+  state.imageAnnotations = imageAnnotations;
+  state.textAnnotations = textAnnotations;
+  state.drawAnnotations = drawAnnotations;
+  state.highlightAnnotations = highlightAnnotations;
+  state.signatureAnnotations = signatureAnnotations;
+  state.commentAnnotations = commentAnnotations;
+  state.stampAnnotations = stampAnnotations;
+}
+
+let sessionSaveTimer = null;
+
+function scheduleSessionSave() {
+  if (!state.sessionHistoryEnabled || !state.currentBytes || !state.currentFileHash) {
+    return;
+  }
+  if (sessionSaveTimer) {
+    window.clearTimeout(sessionSaveTimer);
+  }
+  sessionSaveTimer = window.setTimeout(async () => {
+    sessionSaveTimer = null;
+    const entry = {
+      id: state.currentFileHash || createId("session"),
+      fileName: state.currentFileName || "Untitled.pdf",
+      fileHash: state.currentFileHash,
+      lastOpened: Date.now(),
+      annotations: serializeSessionAnnotations()
+    };
+    const entries = state.sessionEntries.filter((item) => item.fileHash !== entry.fileHash);
+    entries.unshift(entry);
+    state.sessionEntries = entries.slice(0, 12);
+    await saveSessionHistory(state.sessionEntries);
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new Event("session-history-updated"));
+    }
+  }, 500);
+}
+
+async function trackSessionOnOpen(fileName, bytes, enabled = state.sessionHistoryEnabled) {
+  if (!enabled || !bytes) {
+    return;
+  }
+  state.currentFileName = fileName;
+  state.currentFileHash = await hashBytes(bytes);
+  const entry = {
+    id: state.currentFileHash,
+    fileName: fileName || "Untitled.pdf",
+    fileHash: state.currentFileHash,
+    lastOpened: Date.now(),
+    annotations: serializeSessionAnnotations()
+  };
+  const entries = state.sessionEntries.filter((item) => item.fileHash !== entry.fileHash);
+  entries.unshift(entry);
+  state.sessionEntries = entries.slice(0, 12);
+  await saveSessionHistory(state.sessionEntries);
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new Event("session-history-updated"));
+  }
 }
 
 function updatePageLabel(pageLabel) {
@@ -485,10 +799,6 @@ function renderInkLayers(drawLayer, highlightLayer, overlay) {
 
 function renderAnnotations(overlay, statusEl) {
   overlay.innerHTML = "";
-  if (!state.imageAnnotations.length) {
-    renderTextAnnotations(overlay, statusEl);
-    return;
-  }
   const current = state.imageAnnotations.filter(
     (annotation) => annotation.pageNumber === state.currentPage
   );
@@ -516,6 +826,10 @@ function renderAnnotations(overlay, statusEl) {
   });
 
   renderTextAnnotations(overlay, statusEl);
+  renderSignatureAnnotations(overlay, statusEl);
+  renderStampAnnotations(overlay, statusEl);
+  renderCommentAnnotations(overlay, statusEl);
+  syncStampDeleteButton();
 }
 
 function attachAnnotationInteractions(element, annotation, overlay, statusEl) {
@@ -550,6 +864,7 @@ function attachAnnotationInteractions(element, annotation, overlay, statusEl) {
     const onUp = () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      scheduleSessionSave();
     };
 
     window.addEventListener("pointermove", onMove);
@@ -579,6 +894,7 @@ function attachAnnotationInteractions(element, annotation, overlay, statusEl) {
     const onUp = () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      scheduleSessionSave();
     };
 
     window.addEventListener("pointermove", onMove);
@@ -601,6 +917,7 @@ function attachAnnotationInteractions(element, annotation, overlay, statusEl) {
       (item) => item.id !== annotation.id
     );
     element.remove();
+    scheduleSessionSave();
     setStatus(statusEl, "Image removed.");
   });
 }
@@ -652,6 +969,117 @@ function renderTextAnnotations(overlay, statusEl) {
   });
 }
 
+function renderSignatureAnnotations(overlay, statusEl) {
+  const current = state.signatureAnnotations.filter(
+    (annotation) => annotation.pageNumber === state.currentPage
+  );
+  current.forEach((annotation) => {
+    const variant = getSignatureVariant(annotation.fontId);
+    const wrapper = document.createElement("div");
+    wrapper.className = "signature-annotation";
+    wrapper.tabIndex = 0;
+    wrapper.dataset.annotationId = annotation.id;
+    wrapper.dataset.role = "signature-annotation";
+    wrapper.style.left = `${annotation.x}px`;
+    wrapper.style.top = `${annotation.y}px`;
+    wrapper.style.width = `${annotation.width}px`;
+    wrapper.style.height = `${annotation.height}px`;
+    wrapper.style.fontFamily = variant.cssFamily;
+    wrapper.style.letterSpacing = `${(annotation.height * (variant.letterSpacing ?? 0)).toFixed(
+      2
+    )}px`;
+
+    const text = document.createElement("div");
+    text.className = "signature-text";
+    text.textContent = annotation.text;
+    const fontSize = fitSignatureFontSize(
+      annotation.text,
+      variant.cssFamily,
+      annotation.width,
+      annotation.height,
+      variant.letterSpacing ?? 0
+    );
+    text.style.fontSize = `${fontSize}px`;
+    text.style.transform = `translateY(${(annotation.height * (variant.baselineOffset ?? 0)).toFixed(
+      2
+    )}px)`;
+
+    const handle = document.createElement("div");
+    handle.className = "resize-handle";
+
+    wrapper.append(text, handle);
+    attachSignatureInteractions(wrapper, annotation, overlay, statusEl);
+    overlay.append(wrapper);
+  });
+}
+
+function renderCommentAnnotations(overlay, statusEl) {
+  if (!state.commentsVisible) {
+    return;
+  }
+  const current = state.commentAnnotations.filter(
+    (annotation) => annotation.pageNumber === state.currentPage
+  );
+  current.forEach((annotation) => {
+    const wrapper = document.createElement("div");
+    wrapper.className = "comment-annotation";
+    wrapper.tabIndex = 0;
+    wrapper.dataset.role = "comment-annotation";
+    wrapper.dataset.annotationId = annotation.id;
+    wrapper.style.left = `${annotation.x}px`;
+    wrapper.style.top = `${annotation.y}px`;
+    wrapper.style.width = `${annotation.width}px`;
+    wrapper.style.height = `${annotation.height}px`;
+    wrapper.style.color = annotation.color ?? state.toolDefaults.comment.color;
+
+    const content = document.createElement("div");
+    content.className = "comment-content";
+    content.contentEditable = true;
+    content.spellcheck = false;
+    content.textContent = annotation.text ?? state.toolDefaults.comment.text;
+    content.style.fontSize = `${annotation.fontSize ?? 12}px`;
+
+    const handle = document.createElement("div");
+    handle.className = "resize-handle";
+
+    wrapper.append(content, handle);
+    attachCommentInteractions(wrapper, content, annotation, overlay, statusEl);
+    overlay.append(wrapper);
+  });
+}
+
+function renderStampAnnotations(overlay, statusEl) {
+  const current = state.stampAnnotations.filter(
+    (annotation) => annotation.pageNumber === state.currentPage
+  );
+  current.forEach((annotation) => {
+    const wrapper = document.createElement("div");
+    wrapper.className = "stamp-annotation";
+    wrapper.tabIndex = 0;
+    wrapper.dataset.annotationId = annotation.id;
+    wrapper.dataset.role = "stamp-annotation";
+    wrapper.dataset.selected =
+      annotation.id === state.selectedStampId ? "true" : "false";
+    wrapper.style.left = `${annotation.x}px`;
+    wrapper.style.top = `${annotation.y}px`;
+    wrapper.style.width = `${annotation.width}px`;
+    wrapper.style.height = `${annotation.height}px`;
+    wrapper.style.color = annotation.color ?? state.toolDefaults.stamp.color;
+    wrapper.style.fontSize = `${annotation.fontSize ?? 20}px`;
+
+    const text = document.createElement("div");
+    text.className = "stamp-text";
+    text.textContent = annotation.text ?? state.toolDefaults.stamp.text;
+
+    const handle = document.createElement("div");
+    handle.className = "resize-handle";
+
+    wrapper.append(text, handle);
+    attachStampInteractions(wrapper, annotation, overlay, statusEl);
+    overlay.append(wrapper);
+  });
+}
+
 function attachTextInteractions(wrapper, content, annotation, overlay, statusEl) {
   const getBounds = () => getOverlayBounds(overlay);
 
@@ -684,6 +1112,7 @@ function attachTextInteractions(wrapper, content, annotation, overlay, statusEl)
     const onUp = () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      scheduleSessionSave();
     };
 
     window.addEventListener("pointermove", onMove);
@@ -713,6 +1142,7 @@ function attachTextInteractions(wrapper, content, annotation, overlay, statusEl)
     const onUp = () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      scheduleSessionSave();
     };
 
     window.addEventListener("pointermove", onMove);
@@ -736,6 +1166,7 @@ function attachTextInteractions(wrapper, content, annotation, overlay, statusEl)
     const baseStyle = getAnnotationBaseStyle(annotation);
     annotation.text = content.textContent ?? "";
     annotation.spans = serializeTextSpans(content, baseStyle);
+    scheduleSessionSave();
   });
 
   content.addEventListener("focus", () => {
@@ -758,7 +1189,289 @@ function attachTextInteractions(wrapper, content, annotation, overlay, statusEl)
       state.selectedTextElement = null;
     }
     wrapper.remove();
+    scheduleSessionSave();
     setStatus(statusEl, "Text removed.");
+  });
+}
+
+function attachSignatureInteractions(wrapper, annotation, overlay, statusEl) {
+  const getBounds = () => {
+    const rect = overlay.getBoundingClientRect();
+    return {
+      width: rect.width || overlay.offsetWidth,
+      height: rect.height || overlay.offsetHeight
+    };
+  };
+
+  const startMove = (event) => {
+    if (event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const originX = annotation.x;
+    const originY = annotation.y;
+    const bounds = getBounds();
+
+    const onMove = (moveEvent) => {
+      const dx = moveEvent.clientX - startX;
+      const dy = moveEvent.clientY - startY;
+      annotation.x = clamp(originX + dx, 0, bounds.width - annotation.width);
+      annotation.y = clamp(originY + dy, 0, bounds.height - annotation.height);
+      wrapper.style.left = `${annotation.x}px`;
+      wrapper.style.top = `${annotation.y}px`;
+    };
+
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      scheduleSessionSave();
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
+  const startResize = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const originWidth = annotation.width;
+    const originHeight = annotation.height;
+    const bounds = getBounds();
+
+    const onMove = (moveEvent) => {
+      const dx = moveEvent.clientX - startX;
+      const dy = moveEvent.clientY - startY;
+      annotation.width = clamp(originWidth + dx, 80, bounds.width - annotation.x);
+      annotation.height = clamp(originHeight + dy, 40, bounds.height - annotation.y);
+      wrapper.style.width = `${annotation.width}px`;
+      wrapper.style.height = `${annotation.height}px`;
+      const variant = getSignatureVariant(annotation.fontId);
+      const textEl = wrapper.querySelector(".signature-text");
+      if (textEl) {
+        const fontSize = fitSignatureFontSize(
+          annotation.text,
+          variant.cssFamily,
+          annotation.width,
+          annotation.height,
+          variant.letterSpacing ?? 0
+        );
+        textEl.style.fontSize = `${fontSize}px`;
+        textEl.style.transform = `translateY(${(
+          annotation.height * (variant.baselineOffset ?? 0)
+        ).toFixed(2)}px)`;
+      }
+      wrapper.style.letterSpacing = `${(
+        annotation.height * (variant.letterSpacing ?? 0)
+      ).toFixed(2)}px`;
+    };
+
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      scheduleSessionSave();
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
+  wrapper.addEventListener("pointerdown", (event) => {
+    if (event.target.classList.contains("resize-handle")) {
+      startResize(event);
+      return;
+    }
+    wrapper.focus();
+    startMove(event);
+  });
+
+  wrapper.addEventListener("keydown", (event) => {
+    if (event.key !== "Backspace" && event.key !== "Delete") {
+      return;
+    }
+    state.signatureAnnotations = state.signatureAnnotations.filter(
+      (item) => item.id !== annotation.id
+    );
+    wrapper.remove();
+    scheduleSessionSave();
+    setStatus(statusEl, "Signature removed.");
+  });
+}
+
+function attachCommentInteractions(wrapper, content, annotation, overlay, statusEl) {
+  const getBounds = () => {
+    const rect = overlay.getBoundingClientRect();
+    return {
+      width: rect.width || overlay.offsetWidth,
+      height: rect.height || overlay.offsetHeight
+    };
+  };
+
+  const startMove = (event) => {
+    if (event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const originX = annotation.x;
+    const originY = annotation.y;
+    const bounds = getBounds();
+
+    const onMove = (moveEvent) => {
+      const dx = moveEvent.clientX - startX;
+      const dy = moveEvent.clientY - startY;
+      annotation.x = clamp(originX + dx, 0, bounds.width - annotation.width);
+      annotation.y = clamp(originY + dy, 0, bounds.height - annotation.height);
+      wrapper.style.left = `${annotation.x}px`;
+      wrapper.style.top = `${annotation.y}px`;
+    };
+
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      scheduleSessionSave();
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
+  const startResize = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const originWidth = annotation.width;
+    const originHeight = annotation.height;
+    const bounds = getBounds();
+
+    const onMove = (moveEvent) => {
+      const dx = moveEvent.clientX - startX;
+      const dy = moveEvent.clientY - startY;
+      annotation.width = clamp(originWidth + dx, 120, bounds.width - annotation.x);
+      annotation.height = clamp(originHeight + dy, 60, bounds.height - annotation.y);
+      wrapper.style.width = `${annotation.width}px`;
+      wrapper.style.height = `${annotation.height}px`;
+    };
+
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      scheduleSessionSave();
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
+  wrapper.addEventListener("pointerdown", (event) => {
+    if (event.target.classList.contains("resize-handle")) {
+      startResize(event);
+      return;
+    }
+    startMove(event);
+  });
+
+  content.addEventListener("input", () => {
+    annotation.text = content.textContent ?? "";
+    scheduleSessionSave();
+  });
+
+  wrapper.addEventListener("keydown", (event) => {
+    if (event.key !== "Backspace" && event.key !== "Delete") {
+      return;
+    }
+    state.commentAnnotations = state.commentAnnotations.filter(
+      (item) => item.id !== annotation.id
+    );
+    wrapper.remove();
+    scheduleSessionSave();
+    setStatus(statusEl, "Comment removed.");
+  });
+}
+
+function attachStampInteractions(wrapper, annotation, overlay, statusEl) {
+  const getBounds = () => {
+    const rect = overlay.getBoundingClientRect();
+    return {
+      width: rect.width || overlay.offsetWidth,
+      height: rect.height || overlay.offsetHeight
+    };
+  };
+
+  const startMove = (event) => {
+    if (event.button !== 0) {
+      return;
+    }
+    event.preventDefault();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const originX = annotation.x;
+    const originY = annotation.y;
+    const bounds = getBounds();
+
+    const onMove = (moveEvent) => {
+      const dx = moveEvent.clientX - startX;
+      const dy = moveEvent.clientY - startY;
+      annotation.x = clamp(originX + dx, 0, bounds.width - annotation.width);
+      annotation.y = clamp(originY + dy, 0, bounds.height - annotation.height);
+      wrapper.style.left = `${annotation.x}px`;
+      wrapper.style.top = `${annotation.y}px`;
+    };
+
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      scheduleSessionSave();
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
+  const startResize = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const originWidth = annotation.width;
+    const originHeight = annotation.height;
+    const bounds = getBounds();
+
+    const onMove = (moveEvent) => {
+      const dx = moveEvent.clientX - startX;
+      const dy = moveEvent.clientY - startY;
+      annotation.width = clamp(originWidth + dx, 120, bounds.width - annotation.x);
+      annotation.height = clamp(originHeight + dy, 40, bounds.height - annotation.y);
+      wrapper.style.width = `${annotation.width}px`;
+      wrapper.style.height = `${annotation.height}px`;
+    };
+
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      scheduleSessionSave();
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
+  wrapper.addEventListener("pointerdown", (event) => {
+    state.selectedStampId = annotation.id;
+    overlay.querySelectorAll(".stamp-annotation").forEach((item) => {
+      item.dataset.selected = item === wrapper ? "true" : "false";
+    });
+    syncStampDeleteButton();
+    if (event.target.classList.contains("resize-handle")) {
+      startResize(event);
+      return;
+    }
+    startMove(event);
   });
 }
 
@@ -775,7 +1488,8 @@ async function loadPdfBytes(
   highlightLayer,
   pageLabel,
   pageList,
-  applyButton
+  applyButton,
+  sessionData = null
 ) {
   const normalized = toUint8(bytes);
   if (!isPdfBytes(normalized)) {
@@ -790,6 +1504,8 @@ async function loadPdfBytes(
   state.pdfDoc = pdfDoc;
   state.pageCount = pdfDoc.numPages;
   state.currentPage = 1;
+  state.currentFileName = "";
+  state.currentFileHash = "";
   state.pageOrder = Array.from({ length: state.pageCount }, (_, index) => index + 1);
   state.imageAnnotations = [];
   state.imageAssets = [];
@@ -798,6 +1514,11 @@ async function loadPdfBytes(
   state.selectedTextElement = null;
   state.drawAnnotations = [];
   state.highlightAnnotations = [];
+  state.signatureAnnotations = [];
+  state.commentAnnotations = [];
+  state.stampAnnotations = [];
+  state.selectedStampId = null;
+  state.commentsVisible = true;
   state.textDefaults = {
     fontSize: 12,
     fontFamily: "Helvetica",
@@ -809,11 +1530,15 @@ async function loadPdfBytes(
   state.toolDefaults = {
     draw: { color: "#2563eb", size: 4 },
     highlight: { color: "#f59e0b", opacity: 0.35 },
-    comment: { color: "#111111" },
+    comment: { color: "#111111", text: "Comment" },
     stamp: { text: "APPROVED", color: "#111111" },
     mark: { color: "#b91c1c" },
     signature: { name: "" }
   };
+  state.signaturePlacementMode = "full";
+  if (sessionData?.annotations) {
+    applySessionAnnotations(sessionData.annotations);
+  }
   renderPageList(pageList, applyButton);
   updatePageLabel(pageLabel);
   await refreshViewer(canvas, overlay, drawLayer, highlightLayer, pageLabel, statusEl);
@@ -825,6 +1550,7 @@ export function initApp(root) {
     throw new Error("App root element not found");
   }
   applyTheme(getPreferredTheme());
+  document.documentElement.dataset.commentsVisible = "true";
 
   const container = document.createElement("div");
   container.className = "app-shell";
@@ -914,6 +1640,138 @@ export function initApp(root) {
   status.className = "status";
   status.textContent = "Load a PDF to begin.";
 
+  const recentPanel = document.createElement("section");
+  recentPanel.className = "recent-panel";
+  const recentTitle = document.createElement("p");
+  recentTitle.className = "section-title";
+  recentTitle.textContent = "Recent Documents";
+  const recentCopy = document.createElement("p");
+  recentCopy.className = "muted";
+  recentCopy.textContent = "Recent documents are stored locally on this device only.";
+  const rememberHistoryWrap = document.createElement("label");
+  rememberHistoryWrap.className = "remember";
+  const rememberHistoryToggle = document.createElement("input");
+  rememberHistoryToggle.type = "checkbox";
+  rememberHistoryToggle.checked = getRememberHistoryPreference();
+  state.sessionHistoryEnabled = rememberHistoryToggle.checked;
+  const rememberHistoryText = document.createElement("span");
+  rememberHistoryText.textContent = "Remember recent documents";
+  rememberHistoryWrap.append(rememberHistoryToggle, rememberHistoryText);
+  const recentList = document.createElement("ul");
+  recentList.className = "recent-list";
+  recentList.dataset.role = "recent-list";
+  const clearHistoryButton = createButton("Clear History", async () => {
+    state.sessionEntries = [];
+    await clearSessionHistory();
+    renderSessionList();
+    setStatus(status, "History cleared.");
+  });
+  clearHistoryButton.className = "secondary";
+  const resumeInput = document.createElement("input");
+  resumeInput.type = "file";
+  resumeInput.accept = "application/pdf";
+  resumeInput.hidden = true;
+  resumeInput.dataset.role = "resume-input";
+  let pendingSession = null;
+
+  const renderSessionList = () => {
+    recentList.innerHTML = "";
+    if (!state.sessionEntries.length) {
+      const empty = document.createElement("li");
+      empty.className = "muted";
+      empty.textContent = "No recent documents yet.";
+      recentList.append(empty);
+      return;
+    }
+    state.sessionEntries.forEach((entry) => {
+      const item = document.createElement("li");
+      item.className = "recent-item";
+      const label = document.createElement("div");
+      label.className = "recent-meta";
+      const name = document.createElement("span");
+      name.textContent = entry.fileName;
+      const time = document.createElement("span");
+      time.className = "muted";
+      time.textContent = new Date(entry.lastOpened).toLocaleString();
+      label.append(name, time);
+      const actionsRow = document.createElement("div");
+      actionsRow.className = "recent-actions";
+      const openButton = createButton("Open", () => {
+        pendingSession = entry;
+        resumeInput.click();
+      });
+      const removeButton = createButton("Remove", async () => {
+        state.sessionEntries = state.sessionEntries.filter(
+          (itemEntry) => itemEntry.id !== entry.id
+        );
+        await saveSessionHistory(state.sessionEntries);
+        renderSessionList();
+        setStatus(status, "Removed from history.");
+      });
+      actionsRow.append(openButton, removeButton);
+      item.append(label, actionsRow);
+      recentList.append(item);
+    });
+  };
+
+  window.addEventListener("session-history-updated", renderSessionList);
+
+  resumeInput.addEventListener("change", async () => {
+    const file = resumeInput.files?.[0];
+    if (!file || !pendingSession) {
+      return;
+    }
+    if (!isPdfFile(file)) {
+      setStatus(status, "Only PDF files are supported.", true);
+      return;
+    }
+    try {
+      const bytes = await readFileAsArrayBuffer(file);
+      const hash = await hashBytes(bytes);
+      if (hash !== pendingSession.fileHash) {
+        setStatus(status, "Selected file does not match this session. Please reselect.", true);
+        return;
+      }
+      state.currentFileName = pendingSession.fileName;
+      state.currentFileHash = pendingSession.fileHash;
+      await loadPdfBytes(
+        bytes,
+        status,
+        canvas,
+        overlay,
+        drawLayer,
+        highlightLayer,
+        pageLabel,
+        pageList,
+        applyReorderButton,
+        pendingSession
+      );
+      renderAssetList(assetList, status);
+      renderInkLayers(drawLayer, highlightLayer, overlay);
+      renderAnnotations(overlay, status);
+      setStatus(status, "Session restored.");
+    } catch (error) {
+      setStatus(status, `Failed to restore session: ${error.message}`, true);
+    } finally {
+      resumeInput.value = "";
+      pendingSession = null;
+    }
+  });
+
+  rememberHistoryToggle.addEventListener("change", () => {
+    state.sessionHistoryEnabled = rememberHistoryToggle.checked;
+    setRememberHistoryPreference(rememberHistoryToggle.checked);
+  });
+
+  recentPanel.append(
+    recentTitle,
+    rememberHistoryWrap,
+    recentCopy,
+    recentList,
+    clearHistoryButton,
+    resumeInput
+  );
+
   const exportButton = createButton("Export PDF", async () => {
     if (!state.currentBytes) {
       setStatus(status, "Load a PDF before exporting.", true);
@@ -931,8 +1789,15 @@ export function initApp(root) {
           state.imageAnnotations
         );
       }
-      if (state.textAnnotations.length > 0) {
-        exportBytes = await applyTextAnnotations(exportBytes, state.textAnnotations);
+      const exportTextAnnotations = buildExportTextAnnotations();
+      if (exportTextAnnotations.length > 0) {
+        exportBytes = await applyTextAnnotations(exportBytes, exportTextAnnotations);
+      }
+      if (state.signatureAnnotations.length > 0) {
+        exportBytes = await applySignatureAnnotations(
+          exportBytes,
+          state.signatureAnnotations
+        );
       }
       if (state.drawAnnotations.length > 0) {
         exportBytes = await applyDrawAnnotations(exportBytes, state.drawAnnotations);
@@ -963,6 +1828,17 @@ export function initApp(root) {
   settingsButton.dataset.role = "settings-button";
 
   actions.append(exportButton, settingsButton);
+
+  const commentToggle = createButton("Comments: On", () => {
+    state.commentsVisible = !state.commentsVisible;
+    document.documentElement.dataset.commentsVisible = state.commentsVisible ? "true" : "false";
+    commentToggle.textContent = state.commentsVisible ? "Comments: On" : "Comments: Off";
+    renderAnnotations(overlay, status);
+  });
+  commentToggle.className = "secondary";
+  commentToggle.dataset.role = "comments-toggle";
+
+  actions.insertBefore(commentToggle, settingsButton);
 
   const rememberWrap = document.createElement("label");
   rememberWrap.className = "remember";
@@ -1048,13 +1924,33 @@ export function initApp(root) {
         pageList,
         applyReorderButton
       );
+      await trackSessionOnOpen("Restored Session", stored, rememberHistoryToggle.checked);
+      renderSessionList();
       setStatus(status, "Restored last session.");
     } catch (error) {
       setStatus(status, `Failed to restore session: ${error.message}`, true);
     }
   });
 
-  settingsPanel.append(rememberWrap, restoreButton, themeGroup, installGroup);
+  const signatureGroup = document.createElement("section");
+  signatureGroup.className = "panel";
+  const signatureTitle = document.createElement("p");
+  signatureTitle.className = "section-title";
+  signatureTitle.textContent = "Signature";
+  const clearSignatureButton = createButton("Clear Saved Signature", async () => {
+    await clearSignatureProfile();
+    state.signatureProfile = null;
+    if (signatureUi) {
+      signatureUi.nameInput.value = "";
+      signatureUi.initialsInput.value = "";
+      signatureUi.renderVariants();
+    }
+    setStatus(status, "Signature cleared.");
+  });
+  clearSignatureButton.className = "secondary";
+  signatureGroup.append(signatureTitle, clearSignatureButton);
+
+  settingsPanel.append(rememberWrap, restoreButton, themeGroup, installGroup, signatureGroup);
 
   loadInput.addEventListener("change", async () => {
     const file = loadInput.files?.[0];
@@ -1078,6 +1974,8 @@ export function initApp(root) {
         pageList,
         applyReorderButton
       );
+      await trackSessionOnOpen(file.name, bytes, rememberHistoryToggle.checked);
+      renderSessionList();
       if (rememberToggle.checked) {
         await saveLastPdf(state.currentBytes.slice());
       }
@@ -1116,6 +2014,8 @@ export function initApp(root) {
         applyReorderButton
       );
       setStatus(status, "PDFs merged successfully.");
+      await trackSessionOnOpen("Merged.pdf", mergedBytes, rememberHistoryToggle.checked);
+      renderSessionList();
       if (rememberToggle.checked) {
         await saveLastPdf(state.currentBytes.slice());
       }
@@ -1232,6 +2132,7 @@ export function initApp(root) {
       activeDraw = null;
       activeHighlight = null;
       renderInkLayers(drawLayer, highlightLayer, overlay);
+      scheduleSessionSave();
     };
 
     window.addEventListener("pointermove", onMove);
@@ -1239,54 +2140,172 @@ export function initApp(root) {
   });
 
   overlay.addEventListener("click", (event) => {
-    if (state.activeTool !== "text") {
-      return;
-    }
     if (!state.currentBytes) {
-      setStatus(status, "Load a PDF before adding text.", true);
+      if (
+        state.activeTool === "text" ||
+        state.activeTool === "signature" ||
+        state.activeTool === "comment" ||
+        state.activeTool === "stamp"
+      ) {
+        setStatus(status, "Load a PDF before adding annotations.", true);
+      }
       return;
     }
-    if (event.target.closest(".text-annotation") || event.target.closest(".annotation")) {
+    if (state.activeTool === "text") {
+      if (event.target.closest(".text-annotation") || event.target.closest(".annotation")) {
+        return;
+      }
+      const rect = overlay.getBoundingClientRect();
+      const overlayWidth = rect.width || overlay.offsetWidth;
+      const overlayHeight = rect.height || overlay.offsetHeight;
+      if (!overlayWidth || !overlayHeight) {
+        setStatus(status, "Overlay not ready yet. Try again.", true);
+        return;
+      }
+      const x = clamp(event.clientX - rect.left, 0, overlayWidth - 160);
+      const y = clamp(event.clientY - rect.top, 0, overlayHeight - 32);
+      const baseStyle = {
+        bold: state.textDefaults.bold,
+        italic: state.textDefaults.italic,
+        underline: state.textDefaults.underline,
+        fontSize: state.textDefaults.fontSize,
+        color: state.textDefaults.color
+      };
+      const annotation = {
+        id: createId("text"),
+        pageNumber: state.currentPage,
+        x,
+        y,
+        width: 160,
+        height: 32,
+        text: "",
+        fontSize: state.textDefaults.fontSize,
+        fontFamily: state.textDefaults.fontFamily,
+        color: state.textDefaults.color,
+        spans: [{ text: "", ...baseStyle }],
+        overlayWidth,
+        overlayHeight
+      };
+      state.textAnnotations = [...state.textAnnotations, annotation];
+      state.selectedTextId = annotation.id;
+      renderAnnotations(overlay, status);
+      const created = overlay.querySelector(`[data-annotation-id="${annotation.id}"]`);
+      const content = created?.querySelector(".text-content");
+      if (content) {
+        content.focus();
+      }
+      scheduleSessionSave();
       return;
     }
-    const rect = overlay.getBoundingClientRect();
-    const overlayWidth = rect.width || overlay.offsetWidth;
-    const overlayHeight = rect.height || overlay.offsetHeight;
-    if (!overlayWidth || !overlayHeight) {
-      setStatus(status, "Overlay not ready yet. Try again.", true);
+    if (state.activeTool === "signature") {
+      if (
+        event.target.closest(".signature-annotation") ||
+        event.target.closest(".text-annotation") ||
+        event.target.closest(".annotation")
+      ) {
+        return;
+      }
+      if (!state.signatureProfile?.name || !state.signatureProfile?.fontId) {
+        setStatus(status, "Create and select a signature style first.", true);
+        return;
+      }
+      const rect = overlay.getBoundingClientRect();
+      const overlayWidth = rect.width || overlay.offsetWidth;
+      const overlayHeight = rect.height || overlay.offsetHeight;
+      if (!overlayWidth || !overlayHeight) {
+        setStatus(status, "Overlay not ready yet. Try again.", true);
+        return;
+      }
+      const signatureText =
+        state.signaturePlacementMode === "initials" && state.signatureProfile.initials
+          ? state.signatureProfile.initials
+          : state.signatureProfile.name;
+      const width = 220;
+      const height = 72;
+      const x = clamp(event.clientX - rect.left - width / 2, 0, overlayWidth - width);
+      const y = clamp(event.clientY - rect.top - height / 2, 0, overlayHeight - height);
+      const annotation = {
+        id: createId("signature"),
+        pageNumber: state.currentPage,
+        x,
+        y,
+        width,
+        height,
+        text: signatureText,
+        fontId: state.signatureProfile.fontId,
+        overlayWidth,
+        overlayHeight
+      };
+      state.signatureAnnotations = [...state.signatureAnnotations, annotation];
+      renderAnnotations(overlay, status);
+      scheduleSessionSave();
       return;
     }
-    const x = clamp(event.clientX - rect.left, 0, overlayWidth - 160);
-    const y = clamp(event.clientY - rect.top, 0, overlayHeight - 32);
-    const baseStyle = {
-      bold: state.textDefaults.bold,
-      italic: state.textDefaults.italic,
-      underline: state.textDefaults.underline,
-      fontSize: state.textDefaults.fontSize,
-      color: state.textDefaults.color
-    };
-    const annotation = {
-      id: createId("text"),
-      pageNumber: state.currentPage,
-      x,
-      y,
-      width: 160,
-      height: 32,
-      text: "",
-      fontSize: state.textDefaults.fontSize,
-      fontFamily: state.textDefaults.fontFamily,
-      color: state.textDefaults.color,
-      spans: [{ text: "", ...baseStyle }],
-      overlayWidth,
-      overlayHeight
-    };
-    state.textAnnotations = [...state.textAnnotations, annotation];
-    state.selectedTextId = annotation.id;
-    renderAnnotations(overlay, status);
-    const created = overlay.querySelector(`[data-annotation-id="${annotation.id}"]`);
-    const content = created?.querySelector(".text-content");
-    if (content) {
-      content.focus();
+    if (state.activeTool === "comment") {
+      if (event.target.closest(".comment-annotation")) {
+        return;
+      }
+      const rect = overlay.getBoundingClientRect();
+      const overlayWidth = rect.width || overlay.offsetWidth;
+      const overlayHeight = rect.height || overlay.offsetHeight;
+      if (!overlayWidth || !overlayHeight) {
+        setStatus(status, "Overlay not ready yet. Try again.", true);
+        return;
+      }
+      const width = 180;
+      const height = 80;
+      const x = clamp(event.clientX - rect.left, 0, overlayWidth - width);
+      const y = clamp(event.clientY - rect.top, 0, overlayHeight - height);
+      const annotation = {
+        id: createId("comment"),
+        pageNumber: state.currentPage,
+        x,
+        y,
+        width,
+        height,
+        text: state.toolDefaults.comment.text,
+        color: state.toolDefaults.comment.color,
+        fontSize: 12,
+        overlayWidth,
+        overlayHeight
+      };
+      state.commentAnnotations = [...state.commentAnnotations, annotation];
+      renderAnnotations(overlay, status);
+      scheduleSessionSave();
+      return;
+    }
+    if (state.activeTool === "stamp") {
+      if (event.target.closest(".stamp-annotation")) {
+        return;
+      }
+      const rect = overlay.getBoundingClientRect();
+      const overlayWidth = rect.width || overlay.offsetWidth;
+      const overlayHeight = rect.height || overlay.offsetHeight;
+      if (!overlayWidth || !overlayHeight) {
+        setStatus(status, "Overlay not ready yet. Try again.", true);
+        return;
+      }
+      const width = 200;
+      const height = 60;
+      const x = clamp(event.clientX - rect.left, 0, overlayWidth - width);
+      const y = clamp(event.clientY - rect.top, 0, overlayHeight - height);
+      const annotation = {
+        id: createId("stamp"),
+        pageNumber: state.currentPage,
+        x,
+        y,
+        width,
+        height,
+        text: state.toolDefaults.stamp.text,
+        color: state.toolDefaults.stamp.color,
+        fontSize: 20,
+        overlayWidth,
+        overlayHeight
+      };
+      state.stampAnnotations = [...state.stampAnnotations, annotation];
+      state.selectedStampId = annotation.id;
+      renderAnnotations(overlay, status);
+      scheduleSessionSave();
     }
   });
 
@@ -1338,6 +2357,7 @@ export function initApp(root) {
     };
     state.imageAnnotations = [...state.imageAnnotations, annotation];
     renderAnnotations(overlay, status);
+    scheduleSessionSave();
     setStatus(status, "Image placed on page.");
   });
 
@@ -1475,6 +2495,7 @@ export function initApp(root) {
     state.selectedTextId = null;
     state.selectedTextElement = null;
     renderAnnotations(overlay, status);
+    scheduleSessionSave();
     setStatus(status, "Text removed.");
   });
 
@@ -1524,6 +2545,7 @@ export function initApp(root) {
       applyStyleToSelection(style, contentEl, getAnnotationBaseStyle(annotation));
       annotation.text = contentEl.textContent ?? "";
       annotation.spans = serializeTextSpans(contentEl, getAnnotationBaseStyle(annotation));
+      scheduleSessionSave();
       return;
     }
 
@@ -1564,6 +2586,7 @@ export function initApp(root) {
       `[data-annotation-id="${annotation.id}"] .text-content`
     );
     updateTextControls(getAnnotationBaseStyle(annotation));
+    scheduleSessionSave();
   };
 
   fontSizeInput.addEventListener("change", () => {
@@ -1578,6 +2601,7 @@ export function initApp(root) {
     if (annotation) {
       annotation.fontFamily = fontFamilySelect.value;
       renderAnnotations(overlay, status);
+      scheduleSessionSave();
       return;
     }
     state.textDefaults.fontFamily = fontFamilySelect.value;
@@ -1649,6 +2673,9 @@ export function initApp(root) {
       const currentTextAnnotations = state.textAnnotations;
       const currentDrawAnnotations = state.drawAnnotations;
       const currentHighlightAnnotations = state.highlightAnnotations;
+      const currentSignatureAnnotations = state.signatureAnnotations;
+      const currentCommentAnnotations = state.commentAnnotations;
+      const currentStampAnnotations = state.stampAnnotations;
       const pageMapping = new Map();
       state.pageOrder.forEach((oldPageNumber, index) => {
         pageMapping.set(oldPageNumber, index + 1);
@@ -1669,6 +2696,18 @@ export function initApp(root) {
         ...annotation,
         pageNumber: pageMapping.get(annotation.pageNumber) ?? annotation.pageNumber
       }));
+      const remappedSignatureAnnotations = currentSignatureAnnotations.map((annotation) => ({
+        ...annotation,
+        pageNumber: pageMapping.get(annotation.pageNumber) ?? annotation.pageNumber
+      }));
+      const remappedCommentAnnotations = currentCommentAnnotations.map((annotation) => ({
+        ...annotation,
+        pageNumber: pageMapping.get(annotation.pageNumber) ?? annotation.pageNumber
+      }));
+      const remappedStampAnnotations = currentStampAnnotations.map((annotation) => ({
+        ...annotation,
+        pageNumber: pageMapping.get(annotation.pageNumber) ?? annotation.pageNumber
+      }));
       const reorderedBytes = await reorderPdf(state.currentBytes, state.pageOrder);
       await loadPdfBytes(
         reorderedBytes,
@@ -1686,10 +2725,14 @@ export function initApp(root) {
       state.textAnnotations = remappedTextAnnotations;
       state.drawAnnotations = remappedDrawAnnotations;
       state.highlightAnnotations = remappedHighlightAnnotations;
+      state.signatureAnnotations = remappedSignatureAnnotations;
+      state.commentAnnotations = remappedCommentAnnotations;
+      state.stampAnnotations = remappedStampAnnotations;
       renderAssetList(assetList, status);
       renderInkLayers(drawLayer, highlightLayer, overlay);
       renderAnnotations(overlay, status);
       setStatus(status, "Reorder applied.");
+      scheduleSessionSave();
       if (rememberToggle.checked) {
         await saveLastPdf(state.currentBytes.slice());
       }
@@ -1825,13 +2868,20 @@ export function initApp(root) {
   };
 
   const commentPane = () => {
+    const text = document.createElement("input");
+    text.type = "text";
+    text.value = state.toolDefaults.comment.text;
+    text.addEventListener("input", () => {
+      state.toolDefaults.comment.text = text.value || "Comment";
+    });
     const color = document.createElement("input");
     color.type = "color";
     color.value = state.toolDefaults.comment.color;
     color.addEventListener("input", () => {
       state.toolDefaults.comment.color = color.value;
     });
-    return placeholderPane("Comment tools will appear here.", [
+    return placeholderPane("Click on the page to add a comment.", [
+      createLabeledField("Comment text", text),
       createLabeledField("Text color", color)
     ]);
   };
@@ -1849,9 +2899,25 @@ export function initApp(root) {
     color.addEventListener("input", () => {
       state.toolDefaults.stamp.color = color.value;
     });
+    const deleteButton = createButton("Delete selected stamp", () => {
+      if (!state.selectedStampId) {
+        return;
+      }
+      state.stampAnnotations = state.stampAnnotations.filter(
+        (item) => item.id !== state.selectedStampId
+      );
+      state.selectedStampId = null;
+      renderAnnotations(overlay, status);
+      syncStampDeleteButton();
+      scheduleSessionSave();
+      setStatus(status, "Stamp removed.");
+    });
+    stampDeleteButton = deleteButton;
+    syncStampDeleteButton();
     return placeholderPane("Stamp presets are stored locally.", [
       createLabeledField("Stamp text", text),
-      createLabeledField("Stamp color", color)
+      createLabeledField("Stamp color", color),
+      deleteButton
     ]);
   };
 
@@ -1868,16 +2934,159 @@ export function initApp(root) {
     ]);
   };
 
+  let signatureUi = null;
   const signaturePane = () => {
-    const name = document.createElement("input");
-    name.type = "text";
-    name.value = state.toolDefaults.signature.name;
-    name.addEventListener("input", () => {
-      state.toolDefaults.signature.name = name.value;
+    const panel = document.createElement("div");
+    panel.className = "panel";
+
+    const nameInput = document.createElement("input");
+    nameInput.type = "text";
+    nameInput.placeholder = "Full name";
+
+    const initialsInput = document.createElement("input");
+    initialsInput.type = "text";
+    initialsInput.placeholder = "Initials (optional)";
+
+    const fullGroupTitle = document.createElement("p");
+    fullGroupTitle.className = "section-title";
+    fullGroupTitle.textContent = "Full Name Styles";
+    const fullGrid = document.createElement("div");
+    fullGrid.className = "signature-grid";
+
+    const initialsGroupTitle = document.createElement("p");
+    initialsGroupTitle.className = "section-title";
+    initialsGroupTitle.textContent = "Initials Styles";
+    const initialsGrid = document.createElement("div");
+    initialsGrid.className = "signature-grid";
+
+    const placementSelect = document.createElement("select");
+    const fullOption = document.createElement("option");
+    fullOption.value = "full";
+    fullOption.textContent = "Place full name";
+    const initialsOption = document.createElement("option");
+    initialsOption.value = "initials";
+    initialsOption.textContent = "Place initials";
+    placementSelect.append(fullOption, initialsOption);
+    placementSelect.value = state.signaturePlacementMode;
+    placementSelect.addEventListener("change", () => {
+      state.signaturePlacementMode = placementSelect.value;
     });
-    return placeholderPane("Signature setup will be added later.", [
-      createLabeledField("Signer name", name)
-    ]);
+
+    const legalCopy = document.createElement("p");
+    legalCopy.className = "muted";
+    legalCopy.textContent =
+      "This adds a visual signature only. It does not apply cryptographic or digital signing.";
+
+    const updateSelection = () => {
+      const selectedId = state.signatureProfile?.fontId;
+      const updateGrid = (grid) => {
+        Array.from(grid.children).forEach((item) => {
+          item.dataset.selected =
+            selectedId && item.dataset.fontId === selectedId ? "true" : "false";
+        });
+      };
+      updateGrid(fullGrid);
+      updateGrid(initialsGrid);
+      if (state.signatureProfile?.initials) {
+        initialsOption.disabled = false;
+      } else {
+        initialsOption.disabled = true;
+        placementSelect.value = "full";
+        state.signaturePlacementMode = "full";
+      }
+    };
+
+    const renderVariants = () => {
+      const name = nameInput.value.trim();
+      const initials = initialsInput.value.trim();
+      fullGrid.innerHTML = "";
+      initialsGrid.innerHTML = "";
+      if (!name) {
+        const hint = document.createElement("p");
+        hint.className = "muted";
+        hint.textContent = "Enter a name to generate signatures.";
+        fullGrid.append(hint);
+        initialsGroupTitle.hidden = true;
+        initialsGrid.hidden = true;
+        updateSelection();
+        return;
+      }
+
+      SIGNATURE_VARIANTS.forEach((variant) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "signature-option";
+        button.dataset.fontId = variant.id;
+        button.style.fontFamily = variant.cssFamily;
+        button.style.letterSpacing = `${(16 * (variant.letterSpacing ?? 0)).toFixed(2)}px`;
+        button.textContent = name;
+        button.addEventListener("click", async () => {
+          state.signatureProfile = {
+            name,
+            initials: initials || undefined,
+            fontId: variant.id
+          };
+          await saveSignatureProfile(state.signatureProfile);
+          updateSelection();
+        });
+        fullGrid.append(button);
+      });
+
+      if (initials) {
+        initialsGroupTitle.hidden = false;
+        initialsGrid.hidden = false;
+        SIGNATURE_VARIANTS.forEach((variant) => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "signature-option";
+          button.dataset.fontId = variant.id;
+          button.style.fontFamily = variant.cssFamily;
+          button.style.letterSpacing = `${(16 * (variant.letterSpacing ?? 0)).toFixed(2)}px`;
+          button.textContent = initials;
+          button.addEventListener("click", async () => {
+            state.signatureProfile = {
+              name,
+              initials,
+              fontId: variant.id
+            };
+            await saveSignatureProfile(state.signatureProfile);
+            updateSelection();
+          });
+          initialsGrid.append(button);
+        });
+      } else {
+        initialsGroupTitle.hidden = true;
+        initialsGrid.hidden = true;
+      }
+      updateSelection();
+    };
+
+    nameInput.addEventListener("input", renderVariants);
+    initialsInput.addEventListener("input", renderVariants);
+
+    signatureUi = {
+      nameInput,
+      initialsInput,
+      fullGrid,
+      initialsGrid,
+      initialsGroupTitle,
+      placementSelect,
+      renderVariants,
+      updateSelection
+    };
+
+    panel.append(
+      createLabeledField("Full name", nameInput),
+      createLabeledField("Initials", initialsInput),
+      fullGroupTitle,
+      fullGrid,
+      initialsGroupTitle,
+      initialsGrid,
+      createLabeledField("Placement", placementSelect),
+      legalCopy
+    );
+    renderVariants();
+    return panel;
   };
 
   const panes = new Map();
@@ -1923,6 +3132,24 @@ export function initApp(root) {
     }
   });
 
-  container.append(topBar, trustBox, status, workspace);
+  ensureSignatureFontsLoaded();
+  loadSignatureProfile().then((profile) => {
+    if (profile) {
+      state.signatureProfile = profile;
+      if (signatureUi) {
+        signatureUi.nameInput.value = profile.name ?? "";
+        signatureUi.initialsInput.value = profile.initials ?? "";
+        signatureUi.renderVariants();
+      }
+    }
+  });
+  loadSessionHistory().then((entries) => {
+    if (state.sessionEntries.length === 0) {
+      state.sessionEntries = entries ?? [];
+      renderSessionList();
+    }
+  });
+
+  container.append(topBar, trustBox, status, recentPanel, workspace);
   root.append(container);
 }

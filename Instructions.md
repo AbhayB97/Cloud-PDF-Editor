@@ -1353,3 +1353,345 @@ Actual draw tool execution
 Actual highlight placement
 
 Any future refusal to implement these features would be incorrect.
+
+-------------------------------------
+Future Features Pack (Signature · Session History · Comment Visibility) — AUTHORITATIVE
+
+## Purpose
+Implement the next approved feature set for the local-first document editor while preserving all existing guarantees:
+- browser-only execution
+- offline capability
+- explicit user control
+- no backend, no sync, no analytics
+- no architectural rewrites
+
+This task block is **fully authorized**.  
+All work described here is allowed and expected.  
+Anything not explicitly allowed here remains forbidden.
+
+---
+
+## HARD GLOBAL CONSTRAINTS (NON-NEGOTIABLE)
+
+- No backend services
+- No network calls for document processing
+- No cloud storage or sync
+- No user accounts
+- No autosave to disk without user consent
+- No modification of original PDF bytes
+- All persistence must be local (IndexedDB / localStorage)
+- Export logic must continue to use `pdf-lib`
+- Offline behavior must remain intact
+- No refactors outside the scope defined below
+
+Failing any of these invalidates the implementation.
+
+---
+
+# FEATURE 1 — SIGNATURE TOOL (TYPED → STYLIZED, LOCAL MEMORY)
+
+## Goal
+Allow users to add reusable visual signatures **without handwriting capture, uploads, or accounts**.
+
+This feature is **visual signing only**, not cryptographic or legal signing.
+
+---
+
+## Functional Requirements
+
+### Signature Creation Flow
+1. User activates **Signature Tool** from the top bar
+2. A **Signature Pane** opens (movable, floating)
+3. User enters:
+   - Full name (required)
+   - Initials (optional)
+4. App generates **exactly 6 stylized variants**:
+   - 6 full-name signatures
+   - 6 initials (if provided)
+5. User selects **one** preferred style
+6. Selection is saved locally and reused automatically
+7. User places the signature on the document like an annotation:
+   - drag
+   - resize
+   - move between pages
+8. Signature is flattened into the PDF **only on export**
+
+---
+
+## Signature Generation Rules
+
+- Use **embedded cursive fonts only**
+- No handwriting canvas
+- No image upload required
+- Deterministic output:
+  - same name → same 6 options
+- Variants must differ by:
+  - font choice
+  - slight letter spacing
+  - baseline variation (subtle)
+
+---
+
+## Storage Rules
+
+Signature preference must be stored locally:
+
+```ts
+SignatureProfile {
+  name: string
+  initials?: string
+  fontId: string
+}
+Store in IndexedDB or localStorage
+
+Must be user-clearable via Settings
+
+No cross-device sync
+
+Annotation Model
+Signature placement uses an annotation (no special export logic):
+
+ts
+Copy code
+SignatureAnnotation {
+  id: string
+  pageNumber: number
+  x: number
+  y: number
+  width: number
+  height: number
+  text: string
+  fontId: string
+}
+Export Rules
+Render signature as vector text via pdf-lib
+
+Embed font deterministically
+
+Flatten visually (no PDF signature objects)
+
+Original PDF remains untouched
+
+Required UX Copy (Legal Safety)
+Display once in the Signature Pane:
+
+“This adds a visual signature only.
+It does not apply cryptographic or digital signing.”
+
+FEATURE 2 — SESSION HISTORY (LOCAL, AUTOMATIC, TRANSPARENT)
+Goal
+Allow users to resume work on recently opened PDFs without accounts or cloud sync.
+
+Functional Requirements
+Automatic Tracking
+When a PDF is opened:
+
+create or update a session entry
+
+Track:
+
+filename
+
+last opened timestamp
+
+annotation state
+
+Resume Flow
+On app load:
+
+show “Recent Documents” list
+
+User can:
+
+reopen a session
+
+remove a single entry
+
+clear all history
+
+Hard Rules
+No automatic export
+
+No silent file overwrite
+
+No assumption of file permission persistence
+
+If file handle access fails → prompt user to reselect
+
+Storage Model
+Use IndexedDB only:
+
+ts
+Copy code
+SessionEntry {
+  id: string
+  fileName: string
+  fileHash: string
+  lastOpened: number
+  annotations: Annotation[]
+}
+Store annotations only
+
+File bytes must be reloaded via user permission if needed
+
+UX Transparency (Mandatory)
+Provide:
+
+Toggle: “Remember recent documents” (default ON)
+
+Copy:
+
+“Recent documents are stored locally on this device only.”
+
+FEATURE 3 — COMMENT VISIBILITY TOGGLE
+Goal
+Allow users to temporarily hide comments without deleting or exporting changes.
+
+This is a view-only toggle.
+
+Functional Requirements
+Add Show / Hide Comments toggle:
+
+top bar button OR
+
+comment pane toggle
+
+When hidden:
+
+comment overlays are not rendered
+
+comment data remains intact
+
+When shown again:
+
+comments reappear unchanged
+
+Rules
+Do NOT delete comments
+
+Do NOT modify comment data
+
+Do NOT affect other annotations
+
+Do NOT automatically persist hidden state into export
+
+State Model
+Pure UI state only:
+
+ts
+Copy code
+UIState {
+  commentsVisible: boolean
+}
+Default: true
+
+Export Behavior
+Export remains unchanged
+
+Comments are included unless user explicitly deletes them
+
+Optional future enhancement:
+
+“Exclude comments from export” (NOT required now)
+
+FILE RESPONSIBILITIES
+app.js
+Signature tool UI
+
+Signature pane
+
+Session history UI
+
+Comment visibility toggle
+
+Annotation placement and rendering
+
+pdfService.js
+Signature rendering on export
+
+Font embedding
+
+Coordinate conversion (reuse existing logic)
+
+storage.js
+Signature profile persistence
+
+Session history persistence
+
+User-controlled clearing
+
+sw.js / main.js
+❌ No changes allowed
+
+TESTING REQUIREMENTS (MANDATORY)
+Add tests for:
+
+Signature Tool
+Generates exactly 6 variants
+
+Selection persists across reload
+
+Signature annotation exports correctly
+
+Export matches on-screen placement
+
+Session History
+Session entry created on open
+
+Resume restores annotations
+
+Clear history removes entries
+
+Works offline
+
+Comment Visibility
+Toggle hides comments visually
+
+Data remains intact
+
+Export unchanged
+
+Failing tests block completion.
+
+EXPLICITLY OUT OF SCOPE
+Handwritten signature capture
+
+Cryptographic signing
+
+PDF digital signature objects
+
+Cloud sync
+
+Cross-device history
+
+OCR
+
+AI features
+
+Autosave exports
+
+COMPLETION CRITERIA
+This task is complete only when:
+
+Signature tool works end-to-end
+
+Signature choice persists locally
+
+Session history is automatic and transparent
+
+Comments can be hidden without deletion
+
+Export behavior remains stable
+
+Offline usage works
+
+All tests pass
+
+No regressions introduced
+
+FINAL REMINDER
+Build incrementally.
+Do not refactor unrelated code.
+Preserve predictability, stability, and user trust.
+
+This is a professional, local-first tool — act accordingly.

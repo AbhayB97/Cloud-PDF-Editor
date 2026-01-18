@@ -299,4 +299,27 @@ describe("pdfService", () => {
     const updated = await applyHighlightAnnotations(bytes, annotations);
     expect(updated.byteLength).toBeGreaterThan(bytes.byteLength);
   });
+
+  it("applies signature annotations", async () => {
+    const { applySignatureAnnotations } = await import("../src/pdfService.js");
+    const bytes = await createPdfWithPageSizes([[600, 800]]);
+    const original = new Uint8Array(bytes);
+    const annotations = [
+      {
+        id: "signature-1",
+        pageNumber: 1,
+        x: 50,
+        y: 60,
+        width: 220,
+        height: 80,
+        text: "Ada Lovelace",
+        fontId: "sig-allura",
+        overlayWidth: 300,
+        overlayHeight: 400
+      }
+    ];
+    const updated = await applySignatureAnnotations(bytes, annotations);
+    expect(Array.from(new Uint8Array(bytes))).toEqual(Array.from(original));
+    expect(updated.byteLength).toBeGreaterThan(bytes.byteLength);
+  });
 });

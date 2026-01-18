@@ -1,4 +1,6 @@
+import "fake-indexeddb/auto";
 import { describe, expect, it, vi, beforeAll } from "vitest";
+import { clearSessionHistory } from "../src/storage.js";
 
 vi.mock("../src/pdfService.js", () => {
   return {
@@ -14,6 +16,7 @@ vi.mock("../src/pdfService.js", () => {
     reorderPdf: async (bytes) => bytes,
     applyImageAnnotations: async (bytes) => bytes,
     applyTextAnnotations: async (bytes) => bytes,
+    applySignatureAnnotations: async (bytes) => bytes,
     applyDrawAnnotations: async (bytes) => bytes,
     applyHighlightAnnotations: async (bytes) => bytes
   };
@@ -577,5 +580,113 @@ describe("app shell", () => {
     window.dispatchEvent(new Event("pointerup"));
     expect(pane.style.left).toBeTruthy();
     expect(pane.style.top).toBeTruthy();
+  });
+
+  it("renders six signature variants", async () => {
+    const root = setupDom();
+    initApp(root);
+    const signatureTool = root.querySelector("[data-role=\"tool-signature\"]");
+    signatureTool.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const nameInput = root.querySelector("input[placeholder=\"Full name\"]");
+    nameInput.value = "Ada Lovelace";
+    nameInput.dispatchEvent(new Event("input"));
+    const options = root.querySelectorAll(".signature-option");
+    expect(options.length).toBe(6);
+  });
+
+  it("tracks and restores session history", async () => {
+    await clearSessionHistory();
+    window.localStorage.setItem("cloud-pdf-history", "true");
+    const root = setupDom();
+    initApp(root);
+    const historyToggle = root.querySelector(".recent-panel input[type=\"checkbox\"]");
+    historyToggle.checked = true;
+    historyToggle.dispatchEvent(new Event("change"));
+    const loadInput = root.querySelector("[data-role=\"pdf-load\"]");
+    setInputFiles(loadInput, [
+      new File(["%PDF-1.4"], "resume.pdf", { type: "application/pdf" })
+    ]);
+    loadInput.dispatchEvent(new Event("change", { bubbles: true }));
+    const status = root.querySelector(".status");
+    await waitFor(() => status.textContent.includes("PDF loaded"), 10);
+
+    const textTool = root.querySelector("[data-role=\"tool-text\"]");
+    textTool.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const overlay = root.querySelector("[data-role=\"page-overlay\"]");
+    overlay.getBoundingClientRect = () => ({
+      width: 600,
+      height: 800,
+      left: 0,
+      top: 0,
+      right: 600,
+      bottom: 800
+    });
+    const clickEvent = new MouseEvent("click", { bubbles: true, clientX: 120, clientY: 130 });
+    overlay.dispatchEvent(clickEvent);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const annotation = await waitFor(() =>
+      overlay.querySelector("[data-role=\"text-annotation\"]")
+    );
+    expect(annotation).toBeTruthy();
+
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    const recentList = root.querySelector("[data-role=\"recent-list\"]");
+    await waitFor(() => recentList.textContent.includes("resume.pdf"), 20);
+    expect(recentList.textContent).toContain("resume.pdf");
+
+    const openButton = Array.from(recentList.querySelectorAll("button")).find(
+      (button) => button.textContent === "Open"
+    );
+    const resumeInput = root.querySelector("[data-role=\"resume-input\"]");
+    setInputFiles(resumeInput, [
+      new File(["%PDF-1.4"], "resume.pdf", { type: "application/pdf" })
+    ]);
+    openButton.click();
+    resumeInput.dispatchEvent(new Event("change", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const restored = await waitFor(() =>
+      overlay.querySelector("[data-role=\"text-annotation\"]")
+    );
+    expect(restored).toBeTruthy();
+  });
+
+  it("toggles comment visibility without affecting other annotations", async () => {
+    const root = setupDom();
+    initApp(root);
+    const loadInput = root.querySelector("[data-role=\"pdf-load\"]");
+    setInputFiles(loadInput, [
+      new File(["%PDF-1.4"], "comments.pdf", { type: "application/pdf" })
+    ]);
+    loadInput.dispatchEvent(new Event("change", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const overlay = root.querySelector("[data-role=\"page-overlay\"]");
+    overlay.getBoundingClientRect = () => ({
+      width: 600,
+      height: 800,
+      left: 0,
+      top: 0,
+      right: 600,
+      bottom: 800
+    });
+    const textTool = root.querySelector("[data-role=\"tool-text\"]");
+    textTool.click();
+    const clickEvent = new MouseEvent("click", { bubbles: true, clientX: 120, clientY: 130 });
+    overlay.dispatchEvent(clickEvent);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const textAnnotation = await waitFor(() =>
+      overlay.querySelector("[data-role=\"text-annotation\"]")
+    );
+    expect(textAnnotation).toBeTruthy();
+
+    const toggle = root.querySelector("[data-role=\"comments-toggle\"]");
+    toggle.click();
+    expect(document.documentElement.dataset.commentsVisible).toBe("false");
+    expect(overlay.querySelector("[data-role=\"text-annotation\"]")).toBeTruthy();
   });
 });

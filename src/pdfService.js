@@ -1,6 +1,8 @@
 import * as pdfjsLib from "pdfjs-dist/build/pdf";
 import pdfjsWorker from "pdfjs-dist/build/pdf.worker?worker";
 import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+import fontkit from "@pdf-lib/fontkit";
+import { SIGNATURE_LAYOUT, SIGNATURE_VARIANTS, getSignatureVariant } from "./signatureData.js";
 
 if (typeof window !== "undefined") {
   const WorkerCtor =
@@ -233,6 +235,68 @@ const FONT_MAP = {
   }
 };
 
+async function loadSignatureFontBytes(variant) {
+  const fallbackVariants = SIGNATURE_VARIANTS.length
+    ? SIGNATURE_VARIANTS
+    : (await import("./signatureData.js")).SIGNATURE_VARIANTS;
+  const fontFile =
+    typeof variant === "string"
+      ? variant
+      : variant?.fontFile ?? fallbackVariants?.[0]?.fontFile ?? "fonts/Allura-Regular.ttf";
+  const normalizedFontFile =
+    typeof fontFile === "string" && fontFile.trim() !== "undefined" ? fontFile : "";
+  let resolvedFontFile =
+    normalizedFontFile.trim().length > 0 ? normalizedFontFile : "fonts/Allura-Regular.ttf";
+  if (resolvedFontFile.includes("undefined")) {
+    resolvedFontFile = "fonts/Allura-Regular.ttf";
+  }
+  if (typeof window !== "undefined" && typeof fetch === "function") {
+    try {
+      const url = new URL(`/${resolvedFontFile}`, window.location?.origin ?? undefined);
+      const response = await fetch(url);
+      if (response.ok) {
+        const buffer = await response.arrayBuffer();
+        return new Uint8Array(buffer);
+      }
+    } catch {
+      // Fall back to filesystem when running in tests or without a server.
+    }
+  }
+  const fs = await import("node:fs/promises");
+  const readFont = async (_fontPath) => {
+    const path = await import("node:path");
+    const fontPath = path.resolve(process.cwd(), "public", "fonts", "Allura-Regular.ttf");
+    const buffer = await fs.readFile(fontPath);
+    return new Uint8Array(buffer);
+  };
+  if (typeof window === "undefined") {
+    return await readFont("fonts/Allura-Regular.ttf");
+  }
+  try {
+    return await readFont(resolvedFontFile);
+  } catch {
+    return await readFont("fonts/Allura-Regular.ttf");
+  }
+}
+
+function fitSignatureFontSize(font, text, width, height, letterSpacingFactor) {
+  const paddedWidth = Math.max(10, width - SIGNATURE_LAYOUT.paddingX * 2);
+  const paddedHeight = Math.max(10, height - SIGNATURE_LAYOUT.paddingY * 2);
+  const maxSize = Math.max(SIGNATURE_LAYOUT.minFontSize, paddedHeight);
+  let size = maxSize;
+  const spacingFactor = letterSpacingFactor ?? 0;
+  while (size > SIGNATURE_LAYOUT.minFontSize) {
+    const spacing = size * spacingFactor;
+    const textWidth =
+      font.widthOfTextAtSize(text, size) + spacing * Math.max(0, text.length - 1);
+    if (textWidth <= paddedWidth) {
+      return size;
+    }
+    size -= 1;
+  }
+  return SIGNATURE_LAYOUT.minFontSize;
+}
+
 function resolveFontKey(fontFamily, bold, italic) {
   const family = FONT_MAP[fontFamily] ?? FONT_MAP.Helvetica;
   if (bold && italic) {
@@ -434,6 +498,90 @@ export async function applyHighlightAnnotations(bytes, annotations) {
       color: parseHexColor(annotation.color),
       opacity: annotation.opacity ?? 0.3
     });
+  }
+
+  return pdfDoc.save();
+}
+
+export async function applySignatureAnnotations(bytes, annotations) {
+  if (!annotations.length) {
+    return bytes;
+  }
+  const sourceBytes = bytes instanceof Uint8Array ? bytes.slice() : new Uint8Array(bytes);
+  const pdfDoc = await PDFDocument.load(sourceBytes);
+  pdfDoc.registerFontkit(fontkit);
+  const fontCache = new Map();
+
+  for (const annotation of annotations) {
+    const text = String(annotation.text ?? "").trim();
+    if (!text) {
+      continue;
+    }
+    const pageIndex = Math.max(
+      0,
+      Math.min(annotation.pageNumber - 1, pdfDoc.getPageCount() - 1)
+    );
+    const page = pdfDoc.getPage(pageIndex);
+    const { width: pageWidth, height: pageHeight } = page.getSize();
+    if (!annotation.overlayWidth || !annotation.overlayHeight) {
+      throw new Error("Missing overlay size for signature placement.");
+    }
+    const overlaySize = {
+      width: annotation.overlayWidth,
+      height: annotation.overlayHeight
+    };
+    const pdfRect = convertOverlayRectToPdfRect(
+      {
+        x: annotation.x,
+        y: annotation.y,
+        width: annotation.width,
+        height: annotation.height
+      },
+      { width: pageWidth, height: pageHeight },
+      overlaySize
+    );
+    const candidate = getSignatureVariant(annotation.fontId);
+    const fallbackVariants = SIGNATURE_VARIANTS.length
+      ? SIGNATURE_VARIANTS
+      : (await import("./signatureData.js")).SIGNATURE_VARIANTS;
+    const variant = candidate ?? fallbackVariants?.[0];
+    const resolvedVariant = getSignatureVariant(variant?.id ?? annotation.fontId);
+    const fontFile = resolvedVariant?.fontFile ?? "fonts/Allura-Regular.ttf";
+    const cacheKey = resolvedVariant?.id ?? fontFile;
+    if (!fontCache.has(cacheKey)) {
+      const fontBytes = await loadSignatureFontBytes(fontFile);
+      fontCache.set(cacheKey, await pdfDoc.embedFont(fontBytes));
+    }
+    const font = fontCache.get(cacheKey);
+    const fontSize = fitSignatureFontSize(
+      font,
+      text,
+      pdfRect.width,
+      pdfRect.height,
+      resolvedVariant?.letterSpacing
+    );
+    const scaleX = pdfRect.width / annotation.width;
+    const paddingX = SIGNATURE_LAYOUT.paddingX * scaleX;
+    const paddingY = SIGNATURE_LAYOUT.paddingY * (pdfRect.height / annotation.height);
+    const letterSpacing = fontSize * (resolvedVariant?.letterSpacing ?? 0);
+    const baselineOffset = pdfRect.height * (resolvedVariant?.baselineOffset ?? 0);
+    let cursorX = pdfRect.x + paddingX;
+    const cursorY =
+      pdfRect.y +
+      paddingY +
+      (pdfRect.height - paddingY * 2 - fontSize) / 2 +
+      baselineOffset;
+
+    for (const char of text) {
+      page.drawText(char, {
+        x: cursorX,
+        y: cursorY,
+        size: fontSize,
+        font,
+        color: rgb(0, 0, 0)
+      });
+      cursorX += font.widthOfTextAtSize(char, fontSize) + letterSpacing;
+    }
   }
 
   return pdfDoc.save();
